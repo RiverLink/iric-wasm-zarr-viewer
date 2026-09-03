@@ -170,5 +170,5 @@ export async function pickDirectory(inputEl) {
     await walk(dir, `${dir.name}/`);
     return files;
   }
-  return new Promise((res) => { inputEl.onchange = () => res([...inputEl.files]); inputEl.click(); });
+  return new Promise((res) => { inputEl.value = ''; inputEl.addEventListener('change', () => res([...inputEl.files]), { once: true }); inputEl.click(); });
 }

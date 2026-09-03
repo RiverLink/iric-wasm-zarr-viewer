@@ -110,6 +110,7 @@ $('pickLocalFiles').onclick = () => { const inp = $('localFiles'); inp.value = '
 $('pickLocalDir').onclick = async () => { try { addLocalFiles(await pickDirectory($('localDir'))); } catch (e) { if (e.name !== 'AbortError') perr.textContent = String(e); } };
 $('clearCache').onclick = async () => { await cacheClear(); $('localStatus').textContent = 'ブラウザ内キャッシュを削除しました'; };
 $('localFiles').addEventListener('change', () => addLocalFiles([...$('localFiles').files]));
+$('localDir').addEventListener('change', () => addLocalFiles([...$('localDir').files]));   // fallback picker and drag/drop tests
 $('folder').addEventListener('keydown', (e) => { if (e.key === 'Enter') scan(); });
 $('pick').onclick = async () => {
   try { const j = await api('/api/pick-folder', { initial: $('folder').value }); if (j.folder) { $('folder').value = j.folder; scan(); } }
