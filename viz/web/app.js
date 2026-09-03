@@ -76,7 +76,7 @@ function renderList() {
     const meta = p.meta ? `${p.meta.ni}×${p.meta.nj}·${p.meta.nt}` : fmtSize(p.size);
     const cells = [[cb, ''], [p.name, 'name'], [`${KIND[p.kind] || p.kind}${p.kind.startsWith('local') ? '·ローカル' : ''}`, 'st'], [`${st} ${meta}`, 'st']];
     for (const [c, cls] of cells) { const td = document.createElement('td'); if (cls) td.className = cls; td.append(c.nodeType ? c : String(c)); tr.append(td); }
-    tr.title = [p.path, p.solver, p.crs, p.error].filter(Boolean).join('\n');
+    tr.title = [p.name, p.path, p.solver, p.crs, p.error].filter(Boolean).join('\n');
     tr.addEventListener('dblclick', () => { selected = new Set([p.name]); renderList(); openSelected('view'); });
     plist.append(tr);
   }

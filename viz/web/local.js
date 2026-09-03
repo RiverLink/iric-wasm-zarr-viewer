@@ -103,7 +103,12 @@ function idb() {
   });
 }
 async function cacheGet(key) { try { const db = await idb(); return await new Promise((res) => { const q = db.transaction('projects').objectStore('projects').get(key); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); } catch { return null; } }
-async function cachePut(key, val) { try { const db = await idb(); await new Promise((res) => { const q = db.transaction('projects', 'readwrite').objectStore('projects').put(val, key); q.onsuccess = res; q.onerror = res; }); } catch {} }
+async function cachePut(key, val) {
+  try {
+    const db = await idb();
+    await new Promise((res) => { const tx = db.transaction('projects', 'readwrite'); tx.oncomplete = res; tx.onerror = res; tx.onabort = res; tx.objectStore('projects').put(val, key); });
+  } catch (e) { console.warn('cache skipped', e); }
+}
 export async function cacheClear() { try { const db = await idb(); await new Promise((res) => { const q = db.transaction('projects', 'readwrite').objectStore('projects').clear(); q.onsuccess = res; q.onerror = res; }); } catch {} }
 
 // ---------------------------------------------------------------- local project registry
@@ -134,26 +139,48 @@ export async function openLocalProject(entry, onProgress = () => {}) {
   let info = { solver: '', solverVersion: '', crs: null, cgns: 'Case1' }, cgnBuf = null;
   if (entry.kind === 'local-ipro') {
     onProgress('zip を読込中 …', 0.02);
-    const entries = await readZipDirectory(entry.files.ipro);
+    let entries; try { entries = await readZipDirectory(entry.files.ipro); } catch (e) { throw readError(e, entry.files.ipro.name); }
     const xml = entries.find((e) => e.name === 'project.xml');
     if (xml) info = parseProjectXml(new TextDecoder().decode(await readZipEntry(entry.files.ipro, xml)));
     const cgn = entries.find((e) => e.name.toLowerCase() === `${info.cgns}.cgn`.toLowerCase()) || entries.find((e) => e.name.toLowerCase().endsWith('.cgn') && !e.name.toLowerCase().includes('_input'));
     if (!cgn) throw new Error('.ipro 内に CGNS ファイルがありません');
     onProgress(`${cgn.name} を展開中 (${(cgn.size / 1e6).toFixed(0)} MB) …`, 0.05);
-    cgnBuf = await readZipEntry(entry.files.ipro, cgn);
+    try { cgnBuf = await readZipEntry(entry.files.ipro, cgn); } catch (e) { throw readError(e, entry.files.ipro.name); }
   } else if (entry.kind === 'local-folder') {
     info = parseProjectXml(await entry.files.xml.text());
     const cgn = entry.files.cgns.find((f) => f.name.toLowerCase() === `${info.cgns}.cgn`.toLowerCase()) || entry.files.cgns.find((f) => !f.name.toLowerCase().includes('_input'));
     if (!cgn) throw new Error('フォルダに CGNS ファイルがありません');
-    onProgress(`${cgn.name} を読込中 …`, 0.05); cgnBuf = await cgn.arrayBuffer();
+    onProgress(`${cgn.name} を読込中 (${(cgn.size / 1e6).toFixed(0)} MB) …`, 0.05);
+    try { cgnBuf = await cgn.arrayBuffer(); } catch (e) { throw readError(e, cgn.name); }
   } else {
-    onProgress(`${entry.files.cgn.name} を読込中 …`, 0.05); cgnBuf = await entry.files.cgn.arrayBuffer();
+    onProgress(`${entry.files.cgn.name} を読込中 …`, 0.05);
+    try { cgnBuf = await entry.files.cgn.arrayBuffer(); } catch (e) { throw readError(e, entry.files.cgn.name); }
   }
   onProgress('HDF5 リーダー (h5wasm) を読込中 …', 0.1);
   const data = await convertCgns(cgnBuf, info, entry.name, onProgress);
-  onProgress('キャッシュに保存 …', 0.98);
-  await cachePut(key, data);
+  cgnBuf = null;
+  const mb = dataBytes(data) / 1048576;
+  if (mb <= CACHE_MAX_MB) {
+    onProgress(`キャッシュに保存 (${mb.toFixed(0)} MB) …`, 0.98);
+    await Promise.race([cachePut(key, data), new Promise((r) => setTimeout(r, CACHE_TIMEOUT_MS))]);   // best effort: never block the viewer
+  } else {
+    onProgress(`変換データ ${mb.toFixed(0)} MB はキャッシュ上限 ${CACHE_MAX_MB} MB を超えるため保存しません（次回も変換します）`, 0.99);
+  }
   return new MemGroup(data);
+}
+const CACHE_MAX_MB = 250, CACHE_TIMEOUT_MS = 90000;
+function dataBytes(d) {
+  let n = 0;
+  for (const a of [d.x, d.y, d.mx, d.my, d.time]) if (a) n += a.byteLength;
+  for (const r of Object.values(d.results)) n += r.data.byteLength;
+  return n;
+}
+/** Friendlier message for File API read failures. */
+function readError(e, what) {
+  if (e && (e.name === 'NotReadableError' || /NotReadable/.test(String(e)))) {
+    return new Error(`${what} を読めませんでした。他のプログラム（iRIC など）で開かれている、選択後に変更された、またはオンラインのみ（OneDrive 等）のファイルの可能性があります。閉じてから「フォルダを選択」で選び直してください。`);
+  }
+  return e;
 }
 
 /** Directory picker with File System Access API when available, else a hidden <input webkitdirectory>. */
