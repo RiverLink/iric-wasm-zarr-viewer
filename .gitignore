@@ -1,0 +1,20 @@
+# iRIC project data and derived data are never committed (results stay local)
+*.ipro
+*.cgn
+extracted/
+projects/
+viz/cache/
+viz/out/
+viz/downloads/
+viz/shots/
+viz/web/data.zarr/
+viz/web/viz.wat
+viz/server.log
+
+# tooling
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+aaaa_summary/

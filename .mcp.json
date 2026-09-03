@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "iric": {
+      "command": "python",
+      "args": ["viz/mcp_server.py"]
+    }
+  }
+}

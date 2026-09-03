@@ -1,0 +1,21 @@
+{
+  "name": "iric-wasm-zarr-viewer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "asc assembly/index.ts -o web/viz.wasm --textFile web/viz.wat --runtime stub -O3 --noAssert",
+    "serve": "python server.py 8765",
+    "convert": "python convert.py",
+    "synthetic": "python make_synthetic.py",
+    "test": "python test_compare.py"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
+  },
+  "private": true
+}
