@@ -4,110 +4,158 @@
 <meta charset="utf-8">
 <link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>iRIC wasm + zarr viewer</title>
+<title>iRIC 計算結果ビューア</title>
 <style>
-  :root { --bg:#f5f6f8; --panel:#fff; --line:#d9dce1; --fg:#1f2328; --muted:#6a707a; --accent:#1f6feb; --danger:#b42318; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, "Segoe UI", "Yu Gothic UI", sans-serif; }
-  header { padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; white-space:nowrap; }
-  header .sub, .sub { color:var(--muted); font-size:12px; }
-  #folderbar { display:flex; gap:6px; align-items:center; flex:1; min-width:320px; }
-  #folderbar[hidden] { display:none; }
-  #folderbar input { flex:1; font:inherit; padding:5px 8px; border:1px solid var(--line); border-radius:4px; }
-  button { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; color:var(--fg); }
+  :root { --bg:#f3f5f8; --panel:#fff; --side:#f8f9fb; --line:#d9dce1; --fg:#1f2328; --muted:#6a707a; --accent:#1f6feb; --danger:#b42318; --sidebar-w:300px; --drawer-h:260px; --drawer-w:460px; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13.5px/1.45 system-ui, "Segoe UI", "Yu Gothic UI", sans-serif; display:flex; flex-direction:column; overflow:hidden; }
+  button { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; color:var(--fg); }
   button:disabled { opacity:.5; cursor:default; }
   button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-  select, input[type=number], input[type=text] { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:4px; background:#fff; color:var(--fg); }
-  #projects { margin:10px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
-  #projects summary { cursor:pointer; font-weight:600; }
-  #projects table { border-collapse:collapse; width:100%; font-size:13px; margin:6px 0; }
-  #projects th, #projects td { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); }
-  #projects tr.sel { background:#eef4ff; }
-  #projects .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  #status { color:var(--muted); font-size:12px; }
-  #content { padding:0 10px 10px; }
-  .err { color:var(--danger); white-space:pre-wrap; }
+  button.icon { padding:2px 8px; font-size:16px; line-height:1.2; }
+  select, input[type=number], input[type=text] { font:inherit; padding:3px 6px; border:1px solid var(--line); border-radius:4px; background:#fff; color:var(--fg); min-width:0; }
+  .sub { color:var(--muted); font-size:12px; }
+  .err { color:var(--danger); white-space:pre-wrap; font-size:12px; }
   .err:empty { display:none; }
-  /* map views */
-  .mapwrap { position:relative; overflow:hidden; border:1px solid var(--line); background:#fafafa; }
-  .mapwrap canvas { display:block; cursor:crosshair; }
-  .readout { position:absolute; left:8px; top:8px; background:rgba(255,255,255,.9); border:1px solid var(--line); border-radius:4px; padding:3px 8px; font-size:12px; font-family:ui-monospace, Consolas, monospace; pointer-events:none; white-space:pre; }
-  .readout:empty { display:none; }
-  .attr { position:absolute; right:0; bottom:0; background:rgba(255,255,255,.8); font-size:11px; padding:1px 6px; border-top-left-radius:4px; color:#333; pointer-events:none; }
-  .maptitle { position:absolute; right:8px; top:8px; background:rgba(255,255,255,.9); border:1px solid var(--line); border-radius:4px; padding:2px 8px; font-size:13px; font-weight:600; pointer-events:none; }
-  /* viewer layout */
-  .viewer { display:grid; grid-template-columns:230px 1fr; gap:10px; }
-  .viewer aside, .stage { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; }
-  .viewer aside { display:flex; flex-direction:column; gap:8px; align-self:start; }
-  .viewer aside label, .ctl > label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--muted); }
-  .row { display:flex; gap:8px; align-items:center; font-size:13px; flex-wrap:wrap; }
-  .row input[type=number] { width:80px; }
-  .stage { display:flex; flex-direction:column; gap:8px; min-width:0; }
-  .timebar { display:flex; align-items:center; gap:10px; }
-  .timebar input[type=range] { flex:1; }
-  .timebar .t { font-family:ui-monospace, Consolas, monospace; min-width:170px; }
-  .legend { display:flex; align-items:center; gap:8px; font-size:12px; font-family:ui-monospace, Consolas, monospace; }
-  .legend canvas { width:260px; height:14px; border:1px solid var(--line); }
-  .stats { font-size:12px; color:var(--muted); font-family:ui-monospace, Consolas, monospace; white-space:pre-wrap; }
-  details.analysis summary { cursor:pointer; font-weight:600; font-size:13px; }
-  .chart { width:100%; height:260px; display:block; border:1px solid var(--line); background:#fff; }
-  /* compare layout */
-  .compare { display:flex; flex-direction:column; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; }
-  .tabs { display:flex; gap:4px; }
-  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
-  .ctl { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
-  .ctl[hidden] { display:none; }
-  .mapgrid { display:grid; gap:8px; }
-  .panel { min-width:0; overflow:hidden; border:1px solid var(--line); background:#fff; }
+  /* ---- header ---- */
+  header.top { height:42px; flex:none; display:flex; align-items:center; gap:12px; padding:0 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header.top h1 { font-size:15px; margin:0; white-space:nowrap; }
+  #projName { font-weight:600; }
+  .chip { display:inline-block; border:1px solid var(--line); border-radius:12px; padding:0 9px; font-size:12px; background:#fff; }
+  .chip.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  header.top .spacer { flex:1; }
+  /* ---- shell ---- */
+  #app { flex:1; display:flex; min-height:0; }
+  #sidebar { width:var(--sidebar-w); flex:none; overflow-y:auto; overflow-x:hidden; background:var(--side); border-right:1px solid var(--line); display:flex; flex-direction:column; }
+  #sidebar.collapsed { display:none; }
+  #sidebar details.grp { border-bottom:1px solid var(--line); }
+  #sidebar details.grp[hidden] { display:none; }
+  #sidebar details.grp > summary { cursor:pointer; padding:8px 12px; font-weight:600; font-size:13px; list-style:none; display:flex; align-items:center; gap:6px; user-select:none; }
+  #sidebar details.grp > summary::-webkit-details-marker { display:none; }
+  #sidebar details.grp > summary::before { content:"▸"; color:var(--muted); font-size:11px; width:10px; }
+  #sidebar details.grp[open] > summary::before { content:"▾"; }
+  #sidebar details.grp > summary .hint { margin-left:auto; font-weight:400; color:var(--muted); font-size:11px; }
+  #sidebar .body { padding:4px 12px 12px; display:flex; flex-direction:column; gap:8px; }
+  #sidebar label.f { display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--muted); }
+  #sidebar label.f select, #sidebar label.f input[type=text] { width:100%; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .row input[type=number] { width:74px; }
+  .row.tight { gap:4px; }
+  .stats { font-size:11.5px; color:var(--muted); font-family:ui-monospace, Consolas, monospace; white-space:pre-wrap; word-break:break-all; }
+  /* data group */
+  #folderbar { display:flex; gap:4px; flex-wrap:wrap; }
+  #folderbar[hidden] { display:none; }
+  #folderbar input { flex:1; min-width:120px; }
+  #plist { border-collapse:collapse; width:100%; font-size:12px; }
+  #plist td { padding:3px 4px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  #plist tr.sel { background:#eaf1ff; }
+  #plist td.name { word-break:break-all; }
+  #plist td.st { white-space:nowrap; color:var(--muted); }
+  /* ---- stage ---- */
+  #stage { flex:1; min-width:0; display:flex; flex-direction:column; padding:8px; gap:6px; position:relative; }
+  #stage.side { flex-direction:row; }
+  #stage.side .drawer { width:var(--drawer-w); height:auto; }
+  .stagecol { flex:1; min-height:0; min-width:0; display:flex; flex-direction:column; gap:6px; position:relative; }
+  .maparea { flex:1; min-height:0; position:relative; }
+  .maparea .mapgrid { position:absolute; inset:0; display:grid; gap:6px; }
+  .maparea .panel { min-width:0; min-height:0; overflow:hidden; border:1px solid var(--line); background:#fff; position:relative; }
+  .maparea .panel canvas.chart { position:absolute; inset:0; width:100%; height:100%; border:none; }
+  .maparea .tablepanel { overflow:auto; padding:6px; }
+  #showSidebar { position:absolute; left:14px; top:14px; z-index:5; display:none; }
+  #stage.nosb #showSidebar { display:block; }
+  /* map view + overlays */
+  .mapwrap { position:absolute; inset:0; overflow:hidden; border:1px solid var(--line); background:#fafafa; }
   .panel .mapwrap { border:none; }
-  .panel canvas.chart { height:100%; border:none; }
-  .tablepanel { overflow:auto; padding:6px; }
-  .layoutbox summary { cursor:pointer; font-size:13px; font-weight:600; }
-  .layoutbox .cells { display:inline-grid; gap:4px; vertical-align:middle; }
-  .stage.side .body { display:grid; grid-template-columns:minmax(0,1fr) minmax(360px,42%); gap:8px; align-items:start; }
-  .stage.side details.analysis { margin:0; }
-  .stage.side details.analysis canvas.chart { height:auto; }
+  .mapwrap canvas.view { display:block; cursor:crosshair; }
+  .readout { position:absolute; left:8px; top:8px; background:rgba(255,255,255,.9); border:1px solid var(--line); border-radius:4px; padding:3px 8px; font-size:11.5px; font-family:ui-monospace, Consolas, monospace; pointer-events:none; white-space:pre; }
+  .readout:empty { display:none; }
+  .attr { position:absolute; right:0; bottom:0; background:rgba(255,255,255,.8); font-size:10.5px; padding:1px 6px; border-top-left-radius:4px; color:#333; pointer-events:none; }
+  .maptitle { position:absolute; left:50%; transform:translateX(-50%); top:8px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:4px; padding:2px 10px; font-size:12.5px; font-weight:600; pointer-events:none; white-space:nowrap; }
+  .maplegend { position:absolute; left:8px; bottom:8px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font-size:11.5px; font-family:ui-monospace, Consolas, monospace; pointer-events:none; display:flex; flex-direction:column; gap:2px; }
+  .maplegend .bar { display:flex; align-items:center; gap:6px; }
+  .maplegend canvas { width:180px; height:10px; border:1px solid var(--line); }
+  .maplegend[hidden] { display:none; }
+  .zoombtns { position:absolute; right:8px; top:8px; display:flex; flex-direction:column; gap:2px; }
+  .zoombtns button { width:28px; height:26px; padding:0; font-size:14px; background:rgba(255,255,255,.95); }
+  /* timebar */
+  .timebar { flex:none; display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 10px; }
+  .timebar input[type=range] { flex:1; min-width:120px; }
+  .timebar .t { font-family:ui-monospace, Consolas, monospace; white-space:nowrap; }
+  .timebar input[type=number] { width:64px; }
+  .timebar select { padding:2px 4px; }
+  /* drawer */
+  .drawer { flex:none; height:var(--drawer-h); min-height:0; background:var(--panel); border:1px solid var(--line); border-radius:6px; display:flex; flex-direction:column; overflow:hidden; }
+  .drawer[hidden] { display:none; }
+  .drawer .dhead { display:flex; align-items:center; gap:8px; padding:3px 10px; border-bottom:1px solid var(--line); cursor:ns-resize; user-select:none; font-size:12px; }
+  #stage.side .drawer .dhead { cursor:ew-resize; }
+  .drawer .dhead .tabs { display:flex; gap:2px; }
+  .drawer .dhead .tabs button { padding:1px 9px; font-size:12px; border-radius:10px; }
+  .drawer .dhead .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .drawer .dhead .info { color:var(--muted); font-family:ui-monospace, Consolas, monospace; font-size:11.5px; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .drawer .dbody { flex:1; min-height:0; position:relative; }
+  .drawer .dbody canvas.chart { position:absolute; inset:0; width:100%; height:100%; }
+  .infoline { flex:none; font-size:11.5px; color:var(--muted); font-family:ui-monospace, Consolas, monospace; white-space:pre-wrap; padding:0 4px; }
+  .infoline:empty { display:none; }
+  /* compare layout editor */
+  .cells { display:inline-grid; gap:4px; }
+  .cells select { font-size:12px; }
+  .tabs.presets { display:flex; gap:4px; flex-wrap:wrap; }
   .summary { border-collapse:collapse; font-size:12px; }
   .summary th, .summary td { border:1px solid var(--line); padding:3px 8px; text-align:right; white-space:nowrap; }
   .summary th:first-child, .summary td:first-child { text-align:left; }
   .summary th { background:#f0f2f5; }
-  .bottom { display:flex; flex-direction:column; gap:8px; }
-  .bottom .tables { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+  .tables { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+  #welcome { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); text-align:center; padding:24px; }
+  #welcome p { max-width:52ch; }
 </style>
 </head>
 <body>
-<header>
+<header class="top">
+  <button id="toggleSidebar" class="icon" title="サイドバーの表示 / 非表示">≡</button>
   <h1>iRIC 計算結果ビューア</h1>
-  <div id="folderbar">
-    <span class="sub">プロジェクトフォルダ</span>
-    <input id="folder" type="text" placeholder="例: C:\iRIC\projects">
-    <button id="pick">フォルダ選択…</button>
-    <button id="scan" class="primary">スキャン</button>
-  </div>
-  <span id="status"></span>
+  <span id="projName" class="sub"></span>
+  <span id="modeChip" class="chip" hidden></span>
+  <span class="spacer"></span>
+  <span id="convStatus" class="sub"></span>
   <span id="mode" class="sub"></span>
 </header>
-<details id="projects" open>
-  <summary>プロジェクト一覧 <span id="pcount" class="sub"></span></summary>
-  <table><thead><tr><th></th><th>名前</th><th>種別</th><th>ソルバー</th><th>座標系</th><th>サイズ</th><th>変換</th><th>格子 / ステップ</th></tr></thead><tbody id="plist"><tr><td colspan="8" class="sub">フォルダをスキャンしてください</td></tr></tbody></table>
-  <div class="actions" id="localbar">
-    <span class="sub">ローカルファイル（ブラウザ内で変換、サーバー不要）:</span>
-    <button id="pickLocalDir">フォルダを選択</button>
-    <button id="pickLocalFiles">.ipro / .cgn を選択</button>
-    <input id="localFiles" type="file" multiple accept=".ipro,.cgn,.xml" hidden>
-    <input id="localDir" type="file" webkitdirectory hidden>
-    <button id="clearCache" title="ブラウザ内キャッシュ(IndexedDB)を削除">キャッシュ削除</button>
-    <span id="localStatus" class="sub"></span>
-  </div>
-  <div class="actions">
-    <button id="openOne" class="primary" disabled>表示（1 件）</button>
-    <button id="openCompare" disabled>比較・統合解析（2 件以上）</button>
-    <span id="convStatus" class="sub"></span>
-    <span id="perr" class="err"></span>
-  </div>
-</details>
-<div id="content"></div>
+<div id="app">
+  <aside id="sidebar">
+    <details class="grp" id="grp-data" open>
+      <summary>データ <span class="hint" id="pcount"></span></summary>
+      <div class="body" id="grp-data-body">
+        <div id="folderbar">
+          <input id="folder" type="text" placeholder="プロジェクトフォルダ（サーバー側）">
+          <button id="pick">選択…</button><button id="scan" class="primary">スキャン</button>
+        </div>
+        <div class="row tight">
+          <button id="pickLocalDir">フォルダを選択</button>
+          <button id="pickLocalFiles">.ipro / .cgn</button>
+          <button id="clearCache" title="ブラウザ内キャッシュ(IndexedDB)を削除">キャッシュ削除</button>
+          <input id="localFiles" type="file" multiple accept=".ipro,.cgn,.xml" hidden>
+          <input id="localDir" type="file" webkitdirectory hidden>
+        </div>
+        <span id="localStatus" class="sub"></span>
+        <span id="status" class="sub"></span>
+        <table><tbody id="plist"><tr><td class="sub">フォルダをスキャンするか、ローカルの .ipro / フォルダを選択してください</td></tr></tbody></table>
+        <div class="row tight">
+          <button id="openOne" class="primary" disabled>表示</button>
+          <button id="openCompare" disabled>比較・統合解析</button>
+        </div>
+        <span id="perr" class="err"></span>
+      </div>
+    </details>
+    <details class="grp" id="grp-view" open><summary>表示</summary><div class="body" id="grp-view-body"><span class="sub">プロジェクトを開くと表示設定が出ます</span></div></details>
+    <details class="grp" id="grp-analysis" open><summary>解析</summary><div class="body" id="grp-analysis-body"></div></details>
+    <details class="grp" id="grp-layout" hidden><summary>レイアウト</summary><div class="body" id="grp-layout-body"></div></details>
+    <details class="grp" id="grp-output"><summary>出力</summary><div class="body" id="grp-output-body"></div></details>
+  </aside>
+  <main id="stage">
+    <button id="showSidebar" class="icon" title="サイドバーを表示">≡</button>
+    <div id="content" class="stagecol"><div id="welcome"><p>左の「データ」からプロジェクトを選んで「表示」または「比較・統合解析」を押してください。<br>ローカルの .ipro やフォルダはサーバーなしでブラウザ内で変換されます。</p></div></div>
+  </main>
+</div>
 <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -31,18 +31,18 @@ async def main():
                 await pg.wait_for_timeout(1000)
                 st = await pg.inner_text("#convStatus"); err = await pg.inner_text("#perr")
                 if err: print("perr:", err); break
-                if await pg.locator(".viewer").count(): break
+                if await pg.locator(".maparea .mapwrap").count(): break
             print(f"viewer opened in {time.time() - t0:.1f} s; convStatus='{await pg.inner_text('#convStatus')}'")
             await pg.wait_for_timeout(4000)
-            print("meta:", await pg.inner_text(".viewer .stats"))
+            print("meta:", await pg.inner_text("#grp-view-body .stats"))
             await pg.screenshot(path="shots/static_viewer.png")
             # analysis + browser pptx
-            await pg.evaluate("document.querySelector('details.analysis').open = true"); await pg.wait_for_timeout(300)
-            await pg.get_by_role("button", name="全ステップ解析（浸水面積・貯留量・到達時間）").click()
+            await pg.get_by_role("button", name="全ステップ解析").click()
             for _ in range(60):
                 await pg.wait_for_timeout(500)
-                if "解析完了" in await pg.inner_text("details.analysis"): break
-            print("analysis:", [t for t in (await pg.inner_text("details.analysis")).split("\n") if "解析" in t][:2])
+                if "解析完了" in await pg.inner_text("#grp-analysis-body"): break
+            print("analysis:", [t for t in (await pg.inner_text("#grp-analysis-body")).split(chr(10)) if "解析完了" in t][:1])
+            await pg.evaluate("document.getElementById('grp-output').open = true"); await pg.wait_for_timeout(300)
             async with pg.expect_download(timeout=180000) as dl:
                 await pg.get_by_role("button", name="レポート (pptx)").click()
             d = await dl.value; path = os.path.abspath(os.path.join("downloads", "static_" + d.suggested_filename)); await d.save_as(path)
@@ -54,7 +54,7 @@ async def main():
             t0 = time.time(); await pg.click("#openCompare")
             for _ in range(240):
                 await pg.wait_for_timeout(1000)
-                if await pg.locator(".compare").count() or await pg.inner_text("#perr"): break
+                if await pg.locator(".maparea .panel").count() or await pg.inner_text("#perr"): break
             print(f"compare opened in {time.time() - t0:.1f} s; perr='{await pg.inner_text('#perr')}'")
             await pg.wait_for_timeout(5000)
             await pg.screenshot(path="shots/static_compare.png")

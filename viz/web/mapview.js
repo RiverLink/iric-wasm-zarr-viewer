@@ -1,5 +1,6 @@
 // MapView: one canvas showing a scalar field on a project's grid (wasm rasterizer) over optional
-// XYZ basemap tiles, with zoom/pan, hover readout, click probing and overlay drawing.
+// XYZ basemap tiles, with zoom/pan, hover readout, click probing and in-map overlays
+// (legend, title, zoom buttons, attribution).
 import { W_, f32, i32, u8c, fb, scratch, ensureScratch, MAXPX } from './wasm.js';
 import { shared } from './project.js';
 
@@ -13,8 +14,7 @@ export const BASEMAPS = {
   osm:       { url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,                    zmin: 0, zmax: 19, attr: '© OpenStreetMap contributors' },
 };
 const tileCache = new Map();
-const tileWaiters = new Set();
-window.__tiles = tileCache; window.__views = tileWaiters;   // MapViews to re-render when a tile arrives
+const tileWaiters = new Set();   // MapViews to re-render when a tile arrives
 function getTile(src, z, x, y) {
   const n = 2 ** z;
   if (y < 0 || y >= n) return null;
@@ -30,18 +30,30 @@ function getTile(src, z, x, y) {
   tileCache.set(key, img);
   return img;
 }
+const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
+const fmtSig = (v, s = 4) => Number.isFinite(v) ? (+v.toPrecision(s)).toString() : '-';
 
 export class MapView {
   constructor(container, opts = {}) {
     this.opts = opts;
-    this.wrap = document.createElement('div'); this.wrap.className = 'mapwrap';
-    this.canvas = document.createElement('canvas'); this.ctx = this.canvas.getContext('2d');
-    this.readout = document.createElement('div'); this.readout.className = 'readout'; this.readout.textContent = '';
-    this.attr = document.createElement('div'); this.attr.className = 'attr'; this.attr.hidden = true;
-    this.titleEl = document.createElement('div'); this.titleEl.className = 'maptitle'; this.titleEl.hidden = true;
-    this.wrap.append(this.canvas, this.readout, this.titleEl, this.attr);
+    this.wrap = el('div', 'mapwrap');
+    this.canvas = el('canvas', 'view'); this.ctx = this.canvas.getContext('2d');
+    this.readout = el('div', 'readout');
+    this.attr = el('div', 'attr'); this.attr.hidden = true;
+    this.titleEl = el('div', 'maptitle'); this.titleEl.hidden = true;
+    this.legend = el('div', 'maplegend'); this.legend.hidden = true;
+    this.legendCv = el('canvas'); this.legendCv.width = 256; this.legendCv.height = 1;
+    this.legendMin = el('span'); this.legendMax = el('span'); this.legendLabel = el('span');
+    const bar = el('div', 'bar'); bar.append(this.legendMin, this.legendCv, this.legendMax);
+    this.legend.append(bar, this.legendLabel);
+    this.zoom = el('div', 'zoombtns');
+    for (const [txt, title, fn] of [['⌂', '全体表示', () => this.fitAll()], ['+', '拡大', () => this.zoomBy(1.5)], ['−', '縮小', () => this.zoomBy(1 / 1.5)]]) {
+      const b = el('button'); b.textContent = txt; b.title = title; b.onclick = fn; this.zoom.append(b);
+    }
+    if (opts.noControls) this.zoom.hidden = true;
+    this.wrap.append(this.canvas, this.readout, this.titleEl, this.legend, this.zoom, this.attr);
     container.appendChild(this.wrap);
-    this.res = document.createElement('canvas'); this.resCtx = this.res.getContext('2d');
+    this.res = el('canvas'); this.resCtx = this.res.getContext('2d');
     this.view = { ox: 0, oy: 0, scale: 1 };
     this.W = 1; this.H = 1; this.dpr = 1;
     this.project = null; this.state = null; this.cellMap = null; this.last = {};
@@ -54,7 +66,7 @@ export class MapView {
   setProject(p) { const first = !this.project; this.project = p; if (first) this.fit(); }
   resize(cssW, cssH) {
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    let w = Math.round(cssW * this.dpr), h = Math.round(cssH * this.dpr);
+    let w = Math.max(1, Math.round(cssW * this.dpr)), h = Math.max(1, Math.round(cssH * this.dpr));
     if (w * h > MAXPX) { const f = Math.sqrt(MAXPX / (w * h)); w = Math.floor(w * f); h = Math.floor(h * f); }
     const cx = this.view.ox + this.W / 2 / this.view.scale, cy = this.view.oy - this.H / 2 / this.view.scale;
     this.W = w; this.H = h;
@@ -67,6 +79,11 @@ export class MapView {
     const pad = 0.03;
     this.view.scale = Math.min(this.W / ((x1 - x0) * (1 + 2 * pad)), this.H / ((y1 - y0) * (1 + 2 * pad)));
     this.view.ox = (x0 + x1) / 2 - this.W / 2 / this.view.scale; this.view.oy = (y0 + y1) / 2 + this.H / 2 / this.view.scale;
+  }
+  fitAll() { this.fit(this.opts.fitBbox ? this.opts.fitBbox() : undefined); this.viewChanged(); }
+  zoomBy(f) {
+    const v = this.view, cx = v.ox + this.W / 2 / v.scale, cy = v.oy - this.H / 2 / v.scale;
+    v.scale *= f; v.ox = cx - this.W / 2 / v.scale; v.oy = cy + this.H / 2 / v.scale; this.viewChanged();
   }
   setView(v) { this.view.ox = v.ox; this.view.oy = v.oy; this.view.scale = v.scale; }
   nodePx(k) { const p = this.project, o = shared.origin; return [(p.rx[k] - o[0] - this.view.ox) * this.view.scale, (this.view.oy - (p.ry[k] - o[1])) * this.view.scale]; }
@@ -126,8 +143,8 @@ export class MapView {
 
   // ------------------------------------------------------------ rendering
   rerender() { if (this.state) this.render(this.state); }
-  /** state: { t, label, unit, cmap, vmin, vmax, dry, dryThr, dryMask (bool), vec, vecStep, vecScale, grid, basemap, opacity,
-   *           values, depth, u, w, probe {i,j}, line [nodes], title } */
+  /** state: { t, label, unit, cmap, vmin, vmax, dryMask, dryThr, vec, vecStep, vecScale, grid, basemap, opacity,
+   *           values, depth, u, w, probe {i,j}, line [nodes], title, legendNote, hideLegend } */
   async render(state) {
     if (this.rendering) { this.pending = true; this.state = state; return; }
     this.rendering = true; this.state = state;
@@ -162,6 +179,13 @@ export class MapView {
     if (s.overlay) s.overlay(ctx, this);
     this.attr.textContent = withMap ? BASEMAPS[s.basemap].attr : ''; this.attr.hidden = !withMap;
     this.titleEl.textContent = s.title || ''; this.titleEl.hidden = !s.title;
+    if (s.hideLegend || !Number.isFinite(s.vmin)) this.legend.hidden = true;
+    else {
+      drawLegend(this.legendCv, s.cmap);
+      this.legendMin.textContent = fmtSig(s.vmin); this.legendMax.textContent = fmtSig(s.vmax);
+      this.legendLabel.textContent = `${s.label || ''} [${s.unit || '-'}]${s.legendNote ? '  ' + s.legendNote : ''}`;
+      this.legend.hidden = false;
+    }
   }
   drawTiles(src) {
     const bm = BASEMAPS[src], { W, H, view, ctx } = this, o = shared.origin;
@@ -203,7 +227,7 @@ export class MapView {
   }
 }
 
-/** Colour-bar legend into a 256x1 canvas. */
+/** Colour-bar into a 256x1 canvas. */
 export function drawLegend(cv, cmap) {
   const c = cv.getContext('2d'), img = c.createImageData(256, 1), u32 = new Uint32Array(img.data.buffer);
   for (let k = 0; k < 256; k++) u32[k] = W_.colorAt(cmap, k / 255);

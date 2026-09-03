@@ -1,4 +1,5 @@
-// App shell: project folder scanning, conversion, and mounting the viewer / comparison UI.
+// App shell (layout A): left sidebar with accordion groups (data / view / analysis / layout / output),
+// full-size stage on the right. Viewer and comparison modules mount their controls into the groups.
 import { Project } from './project.js';
 import { mountViewer } from './viewer.js';
 import { mountCompare } from './compare.js';
@@ -8,6 +9,18 @@ const $ = (id) => document.getElementById(id);
 const status = $('status'), plist = $('plist'), perr = $('perr'), convStatus = $('convStatus');
 let projects = [], selected = new Set(), mounted = null, serverOk = null, localProjects = [];
 const opened = new Map();   // name -> Project (wasm buffers are allocated once per project)
+const side = { data: $('grp-data-body'), view: $('grp-view-body'), analysis: $('grp-analysis-body'), layout: $('grp-layout-body'), output: $('grp-output-body') };
+
+// ---------------- sidebar chrome
+const sidebar = $('sidebar'), stage = $('stage');
+function setSidebar(open) { sidebar.classList.toggle('collapsed', !open); stage.classList.toggle('nosb', !open); try { localStorage.setItem('iric.sidebar', open ? '1' : '0'); } catch {} window.dispatchEvent(new Event('resize')); }
+$('toggleSidebar').onclick = () => setSidebar(sidebar.classList.contains('collapsed'));
+$('showSidebar').onclick = () => setSidebar(true);
+for (const d of document.querySelectorAll('#sidebar details.grp')) {
+  if (d.id === 'grp-data') { d.open = true; continue; }          // the data group always starts open (nothing is loaded yet)
+  try { const v = localStorage.getItem('iric.grp.' + d.id); if (v !== null) d.open = v === '1'; } catch {}
+  d.addEventListener('toggle', () => { try { localStorage.setItem('iric.grp.' + d.id, d.open ? '1' : '0'); } catch {} });
+}
 
 async function api(path, body) {
   const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined);
@@ -21,13 +34,13 @@ async function detectServer() {
   if (serverOk !== null) return serverOk;
   try { const r = await fetch('/api/projects?folder=', { cache: 'no-store' }); serverOk = (r.headers.get('content-type') || '').includes('json'); } catch { serverOk = false; }
   $('folderbar').hidden = !serverOk;
-  $('mode').textContent = serverOk ? 'サーバー接続あり（サーバー変換 + ブラウザ内変換）' : '静的モード（変換・解析・レポートはすべてブラウザ内）';
+  $('mode').textContent = serverOk ? 'サーバー接続あり' : '静的モード（ブラウザ内で変換・解析）';
   return serverOk;
 }
 function mergeLists() {
   const server = projects.filter((p) => !p.kind.startsWith('local'));
   projects = [...localProjects, ...server];
-  $('pcount').textContent = `(${projects.length} 件)`;
+  $('pcount').textContent = projects.length ? `${projects.length} 件` : '';
   renderList();
 }
 async function scan() {
@@ -53,15 +66,17 @@ function addLocalFiles(files) {
 
 function renderList() {
   plist.replaceChildren();
-  if (!projects.length) { plist.innerHTML = '<tr><td colspan="8" class="sub">iRIC プロジェクト（*.ipro または project.xml を含むフォルダ）が見つかりません</td></tr>'; return; }
+  if (!projects.length) { plist.innerHTML = '<tr><td class="sub">iRIC プロジェクト（*.ipro または project.xml を含むフォルダ）が見つかりません</td></tr>'; return; }
+  const KIND = { ipro: '.ipro', folder: 'フォルダ', 'local-ipro': '.ipro', 'local-folder': 'フォルダ', 'local-cgn': '.cgn' };
   for (const p of projects) {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = selected.has(p.name);
     cb.addEventListener('change', () => { cb.checked ? selected.add(p.name) : selected.delete(p.name); updateButtons(); tr.classList.toggle('sel', cb.checked); });
     const tr = document.createElement('tr'); tr.classList.toggle('sel', cb.checked);
-    const KIND = { ipro: '.ipro', folder: 'フォルダ', 'local-ipro': '.ipro（ローカル）', 'local-folder': 'フォルダ（ローカル）', 'local-cgn': '.cgn（ローカル）' };
-    const cells = [cb, p.name, KIND[p.kind] || p.kind, `${p.solver || (p.kind.startsWith('local') ? '（変換時に判定）' : '?')} ${p.solverVersion || ''}`, p.crs || '-', fmtSize(p.size),
-      p.converted ? '済' : (p.error ? `エラー: ${p.error}` : (opened.has(p.name) ? '済（ブラウザ）' : '未')), p.meta ? `${p.meta.ni}×${p.meta.nj} / ${p.meta.nt}` : '-'];
-    for (const c of cells) { const td = document.createElement('td'); td.append(c.nodeType ? c : String(c)); tr.append(td); }
+    const st = p.converted || opened.has(p.name) ? '済' : (p.error ? 'エラー' : '未');
+    const meta = p.meta ? `${p.meta.ni}×${p.meta.nj}·${p.meta.nt}` : fmtSize(p.size);
+    const cells = [[cb, ''], [p.name, 'name'], [`${KIND[p.kind] || p.kind}${p.kind.startsWith('local') ? '·ローカル' : ''}`, 'st'], [`${st} ${meta}`, 'st']];
+    for (const [c, cls] of cells) { const td = document.createElement('td'); if (cls) td.className = cls; td.append(c.nodeType ? c : String(c)); tr.append(td); }
+    tr.title = [p.path, p.solver, p.crs, p.error].filter(Boolean).join('\n');
     tr.addEventListener('dblclick', () => { selected = new Set([p.name]); renderList(); openSelected('view'); });
     plist.append(tr);
   }
@@ -74,13 +89,13 @@ async function ensureConverted(names) {
     const p = projects.find((x) => x.name === name);
     if (p.kind.startsWith('local')) {
       if (opened.has(name)) continue;
-      const group = await openLocalProject(p, (msg, frac) => { convStatus.textContent = `ブラウザ内変換 (${k + 1}/${names.length}) ${name}: ${msg} ${frac !== undefined ? Math.round(frac * 100) + '%' : ''}`; });
+      const group = await openLocalProject(p, (msg, frac) => { convStatus.textContent = `変換 (${k + 1}/${names.length}) ${name}: ${msg} ${frac !== undefined ? Math.round(frac * 100) + '%' : ''}`; });
       opened.set(name, await Project.fromGroup(name, group));
       const A = group.attrs; p.meta = { ni: A.ni, nj: A.nj, nt: A.nt }; p.solver = A.solver; p.solverVersion = A.solverVersion; p.crs = A.crs; p.converted = true;
       continue;
     }
     if (p.converted) continue;
-    convStatus.textContent = `変換中 (${k + 1}/${names.length}): ${name} … (CGNS → Zarr, 数十秒かかることがあります)`;
+    convStatus.textContent = `変換中 (${k + 1}/${names.length}): ${name} … (CGNS → Zarr)`;
     const j = await api('/api/convert', { path: p.path });
     p.converted = true; p.meta = j.meta;
   }
@@ -98,10 +113,15 @@ async function openSelected(mode) {
     for (const n of names) { if (!opened.has(n)) opened.set(n, await Project.open(n)); ps.push(opened.get(n)); }
     convStatus.textContent = '';
     if (mounted) mounted.destroy();
-    $('projects').open = false;
-    mounted = mode === 'view' ? mountViewer($('content'), ps[0]) : mountCompare($('content'), ps);
+    for (const g of Object.values(side)) if (g !== side.data) g.replaceChildren();
+    $('grp-layout').hidden = mode !== 'compare';
+    $('grp-data').open = false; $('grp-view').open = true; $('grp-analysis').open = true;
+    const ctx = { stage, content: $('content'), side };
+    mounted = mode === 'view' ? mountViewer(ctx, ps[0]) : mountCompare(ctx, ps);
+    $('projName').textContent = names.join(' / ');
+    $('modeChip').textContent = mode === 'view' ? '単一' : `比較 ${names.length} 件`; $('modeChip').hidden = false;
     document.title = mode === 'view' ? `${names[0]} – iRIC viewer` : `比較: ${names.join(', ')}`;
-  } catch (e) { perr.textContent = String(e); console.error(e); convStatus.textContent = ''; }
+  } catch (e) { perr.textContent = String(e); console.error(e); convStatus.textContent = ''; $('grp-data').open = true; }
   updateButtons();
 }
 
@@ -110,7 +130,7 @@ $('pickLocalFiles').onclick = () => { const inp = $('localFiles'); inp.value = '
 $('pickLocalDir').onclick = async () => { try { addLocalFiles(await pickDirectory($('localDir'))); } catch (e) { if (e.name !== 'AbortError') perr.textContent = String(e); } };
 $('clearCache').onclick = async () => { await cacheClear(); $('localStatus').textContent = 'ブラウザ内キャッシュを削除しました'; };
 $('localFiles').addEventListener('change', () => addLocalFiles([...$('localFiles').files]));
-$('localDir').addEventListener('change', () => addLocalFiles([...$('localDir').files]));   // fallback picker and drag/drop tests
+$('localDir').addEventListener('change', () => addLocalFiles([...$('localDir').files]));
 $('folder').addEventListener('keydown', (e) => { if (e.key === 'Enter') scan(); });
 $('pick').onclick = async () => {
   try { const j = await api('/api/pick-folder', { initial: $('folder').value }); if (j.folder) { $('folder').value = j.folder; scan(); } }
@@ -118,9 +138,9 @@ $('pick').onclick = async () => {
 };
 $('openOne').onclick = () => openSelected('view');
 $('openCompare').onclick = () => openSelected('compare');
-$('projects').addEventListener('toggle', () => window.dispatchEvent(new Event('resize')));
 
-// initial folder: URL ?folder=..., else last used, else ../projects next to the app
+// initial state
+try { if (localStorage.getItem('iric.sidebar') === '0') setSidebar(false); } catch {}
 const qs = new URLSearchParams(location.search);
 let initial = qs.get('folder');
 if (!initial) { try { initial = localStorage.getItem('iric.folder'); } catch {} }

@@ -40,10 +40,10 @@ async def main():
             t0 = time.time(); await pg.click("#openOne")
             for _ in range(240):
                 await pg.wait_for_timeout(1000)
-                if await pg.locator(".viewer").count() or await pg.inner_text("#perr"): break
+                if await pg.locator(".maparea .mapwrap").count() or await pg.inner_text("#perr"): break
             print(f"viewer in {time.time() - t0:.1f}s perr='{await pg.inner_text('#perr')}'")
             await pg.wait_for_timeout(3000)
-            print("stats:", (await pg.inner_text(".viewer .stats")).split("\n")[0])
+            print("stats:", (await pg.inner_text("#grp-view-body .stats")).split("\n")[0])
             await pg.screenshot(path=os.path.join(HERE, "shots", "folder_viewer.png"))
             # 2) a single project folder selected directly
             await pg.goto(f"http://127.0.0.1:{PORT}/"); await pg.wait_for_timeout(2000)

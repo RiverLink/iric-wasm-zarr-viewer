@@ -1,16 +1,16 @@
-// Multi-project comparison as a configurable dashboard: an R x C grid of panels, each showing a
-// case map, a difference map, an ensemble map, a chart (point / section / statistics) or the
-// summary table. Presets reproduce the classic views; the layout is saved in localStorage.
-import { MapView, drawLegend } from './mapview.js';
+// Multi-project comparison (layout A): sidebar groups hold the controls, the stage holds an R x C
+// dashboard of panels (case maps, difference map, ensemble map, charts, summary table) with a shared
+// timeline. Presets reproduce the classic views; the layout is saved in localStorage.
+import { MapView } from './mapview.js';
 import { drawChart, PALETTE } from './charts.js';
-import { h, select, labeled, check, num, timebar, fmt, fmtSig, downloadText } from './ui.js';
+import { h, select, labeled, check, num, timebar, observeSize, fmt, fmtSig, downloadText } from './ui.js';
 import { chartImage, snapshotMap, downloadReport, today } from './report.js';
 import { BASEMAP_OPTIONS } from './viewer.js';
 
 const CMAP_OPTIONS = [['0', 'viridis'], ['4', 'turbo'], ['1', 'jet'], ['2', 'blues'], ['3', 'terrain']];
 const LS_KEY = 'iric.compare.layout';
 
-export function mountCompare(container, projects) {
+export function mountCompare({ stage, content, side }, projects) {
   const P = projects, ref = P[0], N = P.length;
   const sameGrid = P.every((p) => p.sameGridAs(ref));
   const nt = Math.min(...P.map((p) => p.nt));
@@ -21,7 +21,7 @@ export function mountCompare(container, projects) {
   let probe = null, pointSpec = null, statsSpec = null, sectionSpec = null, tableEl = null;
   const colors = P.map((_, k) => PALETTE[k % PALETTE.length]);
 
-  // ---------------- panel kinds
+  // ---------------- panel kinds & presets
   const KINDS = [
     ...P.map((p, k) => [`map:${k}`, `地図: ${p.name}`]),
     ['diff', '差分マップ (A − B)'], ['ens', '統合マップ'], ['point', 'グラフ: 地点時系列'], ['section', 'グラフ: 断面比較'], ['stats', 'グラフ: 統計時系列'], ['table', '要約表'], ['empty', '（空）'],
@@ -38,37 +38,43 @@ export function mountCompare(container, projects) {
   if (!layout) layout = PRESETS.grid();
   const saveLayout = () => { try { localStorage.setItem(LS_KEY, JSON.stringify({ ...layout, n: N })); } catch {} };
 
-  // ---------------- controls
-  const tabs = [['grid', '並列表示'], ['diff', '差分'], ['ens', '統合解析'], ['stats', '統計比較']].map(([m, label]) => h('button', { onclick: () => applyLayout(PRESETS[m]()) }, label));
+  // ---------------- sidebar: 表示
   const varSel = select(varNames.map((k) => [k, ref.label(k)]), ui.var, (v) => { ui.var = v; ui.cmap = v === 'Depth' ? 2 : 0; cmapSel.value = String(ui.cmap); render(); if (probe) onProbe(); });
   const cmapSel = select(CMAP_OPTIONS, String(ui.cmap), (v) => { ui.cmap = +v; render(); });
   const bmSel = select(BASEMAP_OPTIONS, ui.basemap, (v) => { ui.basemap = v; render(); }); bmSel.disabled = !ref.hasMerc;
-  const opacity = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: ui.opacity, style: 'width:120px', oninput: (e) => { ui.opacity = +e.target.value; render(); } });
+  const opacity = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: ui.opacity, style: 'flex:1', oninput: (e) => { ui.opacity = +e.target.value; render(); } });
   const projOpts = P.map((p, k) => [String(k), p.name]);
   const selA = select(projOpts, String(ui.diffA), (v) => { ui.diffA = +v; render(); }), selB = select(projOpts, String(ui.diffB), (v) => { ui.diffB = +v; render(); });
   const ensSel = select([['freq', '浸水頻度（浸水したケースの割合）'], ['envmax', '包絡最大水深（全ケースの最大）'], ['envmin', '最小の最大水深'], ['arrmin', '最早到達時間'], ['arrspread', '到達時間の幅（最遅 − 最早）']], 'freq', (v) => { ui.ensemble = v; render(); });
   const clickSel = select([['ts', '地点時系列'], ['xs', '横断面（i 一定, j 方向）'], ['ls', '縦断面（j 一定, i 方向）']], 'ts', (v) => { ui.clickMode = v; if (probe) onProbe(); render(); });
-  const prog = h('span', { class: 'sub' }), err = h('div', { class: 'err' }), info = h('div', { class: 'stats' });
-  const btnRun = h('button', { onclick: () => runAll().catch((e) => { err.textContent = String(e); }) }, '全ケース解析（浸水面積・到達時間）');
-  const btnReport = h('button', { class: 'primary', onclick: () => makeReport().catch((e) => { err.textContent = String(e); prog.textContent = ''; }) }, 'レポート (pptx)');
-  const btnCsv = h('button', { onclick: exportCsv }, 'CSV 出力');
-  const ctl = h('div', { class: 'ctl' },
-    h('div', { class: 'tabs' }, tabs), labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('背景地図', bmSel), labeled('不透明度', opacity),
-    check('乾燥セルを透過/グレー', true, (v) => { ui.dry = v; render(); }), h('div', { class: 'row' }, '閾値', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); }, 70)),
-    check('流速ベクトル', false, (v) => { ui.vec = v; render(); }), labeled('クリック動作', clickSel),
-    labeled('差分 A', selA), h('span', { style: 'padding-bottom:6px' }, '−'), labeled('B', selB), labeled('統合指標', ensSel),
-    btnRun, prog, btnReport, btnCsv);
+  const err = h('div', { class: 'err' });
+  side.view.replaceChildren(
+    labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('背景地図', bmSel), h('div', { class: 'row' }, '不透明度', opacity),
+    check('乾燥セルを透過 / グレー', true, (v) => { ui.dry = v; render(); }), h('div', { class: 'row' }, '乾燥閾値 [m]', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); })),
+    check('流速ベクトル', false, (v) => { ui.vec = v; render(); }),
+    h('div', { class: 'row', style: 'gap:4px' }, labeled('差分 A', selA), h('span', { style: 'padding-top:14px' }, '−'), labeled('B', selB)),
+    labeled('統合指標', ensSel),
+    sameGrid ? '' : h('span', { class: 'sub' }, '※ 格子が異なるため差分・統合マップ・地点/断面比較は使えません'), err);
 
-  // layout editor
+  // ---------------- sidebar: 解析
+  const prog = h('span', { class: 'sub' });
+  const btnRun = h('button', { class: 'primary', onclick: () => runAll().catch((e) => { err.textContent = String(e); }) }, '全ケース解析');
+  side.analysis.replaceChildren(labeled('クリック動作', clickSel), h('div', { class: 'row tight' }, btnRun), prog,
+    h('span', { class: 'sub' }, '全ケース解析: 浸水面積・貯留量・到達時間などを全ケースで計算し、統合マップ・統計グラフ・要約表を有効にします'));
+
+  // ---------------- sidebar: レイアウト
+  const tabs = [['grid', '並列表示'], ['diff', '差分'], ['ens', '統合解析'], ['stats', '統計比較']].map(([m, label]) => h('button', { onclick: () => applyLayout(PRESETS[m]()) }, label));
   const rowsIn = num(layout.rows, 1, (v) => setGridSize(v, layout.cols), 56), colsIn = num(layout.cols, 1, (v) => setGridSize(layout.rows, v), 56);
   const panelHIn = num(0, 20, (v) => { ui.panelH = Math.max(0, v | 0); layoutPanels(); render(); drawAllCharts(); }, 70);
   const cellEditor = h('div', { class: 'cells' });
-  const layoutBox = h('details', { class: 'layoutbox' }, h('summary', {}, 'レイアウト'),
-    h('div', { class: 'row', style: 'margin:6px 0' }, '行', rowsIn, '× 列', colsIn, h('span', { class: 'sub' }, '　パネル高さ [px]（0 = 自動）'), panelHIn,
-      h('span', { class: 'sub' }, '　各パネルの内容:'), cellEditor));
+  side.layout.replaceChildren(
+    labeled('プリセット', h('div', { class: 'tabs presets' }, tabs)),
+    h('div', { class: 'row' }, '行', rowsIn, '× 列', colsIn),
+    h('div', { class: 'row' }, 'パネル高さ [px]', panelHIn, h('span', { class: 'sub' }, '0 = 自動')),
+    labeled('各パネルの内容', cellEditor));
   function rebuildCellEditor() {
     cellEditor.replaceChildren();
-    cellEditor.style.gridTemplateColumns = `repeat(${layout.cols}, auto)`;
+    cellEditor.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(0, 1fr))`;
     layout.cells.forEach((kind, k) => cellEditor.append(select(KINDS, kind, (v) => { layout.cells[k] = v; applyLayout(layout); })));
   }
   function setGridSize(rows, cols) {
@@ -78,11 +84,16 @@ export function mountCompare(container, projects) {
     applyLayout({ rows, cols, cells });
   }
 
+  // ---------------- sidebar: 出力
+  const btnCsv = h('button', { onclick: exportCsv }, 'CSV（表示中のグラフ）');
+  const rprog = h('span', { class: 'sub' });
+  side.output.replaceChildren(h('div', { class: 'row tight' }, h('button', { class: 'primary', onclick: () => makeReport().catch((e) => { err.textContent = String(e); rprog.textContent = ''; }) }, 'レポート (pptx)'), btnCsv), rprog);
+
+  // ---------------- stage
   const tb = timebar(nt, timeArr, () => render());
-  const grid = h('div', { class: 'mapgrid' });
-  const legendBar = h('canvas', { width: 256, height: 1 }), lmin = h('span'), lmax = h('span'), lunit = h('span');
-  const rootEl = h('div', { class: 'compare' }, ctl, layoutBox, tb.el, grid, h('div', { class: 'legend' }, lmin, legendBar, lmax, lunit, h('span', { class: 'sub' }, sameGrid ? '' : '※ 格子が異なるため差分・統合マップ・地点/断面比較は使えません（統計比較のみ）')), info, err);
-  container.replaceChildren(rootEl);
+  const mapArea = h('div', { class: 'maparea' }), grid = h('div', { class: 'mapgrid' }); mapArea.append(grid);
+  const info = h('div', { class: 'infoline' });
+  content.replaceChildren(mapArea, tb.el, info);
 
   // ---------------- panels
   const slots = [];              // { kind, el, view?, canvas? }
@@ -91,6 +102,7 @@ export function mountCompare(container, projects) {
   const onClick = (i, j) => { probe = { i, j }; onProbe(); render(); };
   const onProbe = () => (ui.clickMode === 'ts' ? buildPoint() : buildSection());
   const sectionLine = () => (probe && sameGrid && ui.clickMode !== 'ts') ? ref.sectionNodes(probe.i, probe.j, ui.clickMode) : null;
+  const unionBbox = () => { const b = P.map((p) => p.bbox); return [Math.min(...b.map((x) => x[0])), Math.min(...b.map((x) => x[1])), Math.max(...b.map((x) => x[2])), Math.max(...b.map((x) => x[3]))]; };
 
   function applyLayout(L) {
     layout = { rows: L.rows, cols: L.cols, cells: L.cells.slice(0, L.rows * L.cols) };
@@ -99,10 +111,11 @@ export function mountCompare(container, projects) {
     for (const s of slots) if (s.view) s.view.destroy();
     slots.length = 0; grid.replaceChildren();
     grid.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(0, 1fr))`;
+    grid.style.gridTemplateRows = ui.panelH ? `repeat(${layout.rows}, ${ui.panelH}px)` : `repeat(${layout.rows}, minmax(0, 1fr))`;
     for (const kind of layout.cells) {
       const el = h('div', { class: 'panel' }); grid.append(el);
       const s = { kind, el };
-      if (isMap(kind)) { s.view = new MapView(el, { onViewChange, onClick, onError: (e) => { err.textContent = String(e); } }); s.view.setProject(ref); }
+      if (isMap(kind)) { s.view = new MapView(el, { onViewChange, onClick, fitBbox: unionBbox, onError: (e) => { err.textContent = String(e); } }); s.view.setProject(ref); }
       else if (kind === 'point' || kind === 'section' || kind === 'stats') { s.canvas = h('canvas', { class: 'chart' }); el.append(s.canvas); }
       else if (kind === 'table') { el.classList.add('tablepanel'); }
       slots.push(s);
@@ -112,22 +125,17 @@ export function mountCompare(container, projects) {
     if (first) { if (sharedView) first.view.setView(sharedView); else first.view.fit(unionBbox()); for (const s of slots) if (s.view) s.view.setView(first.view.view); }
     render(); drawAllCharts(); fillTables();
   }
-  function unionBbox() { const b = P.map((p) => p.bbox); return [Math.min(...b.map((x) => x[0])), Math.min(...b.map((x) => x[1])), Math.max(...b.map((x) => x[2])), Math.max(...b.map((x) => x[3]))]; }
   function layoutPanels() {
-    const r = grid.getBoundingClientRect();
-    const avail = Math.max(240, window.innerHeight - r.top - 110);
-    const cellH = ui.panelH || Math.max(220, Math.floor((avail - 8 * (layout.rows - 1)) / layout.rows));
-    const cellW = Math.floor((grid.clientWidth - 8 * (layout.cols - 1)) / layout.cols);
+    grid.style.gridTemplateRows = ui.panelH ? `repeat(${layout.rows}, ${ui.panelH}px)` : `repeat(${layout.rows}, minmax(0, 1fr))`;
+    grid.style.overflowY = ui.panelH ? 'auto' : 'hidden';
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     for (const s of slots) {
-      s.el.style.height = `${cellH}px`;
-      if (s.view) s.view.resize(cellW, cellH);
-      if (s.canvas) { s.canvas.style.height = `${cellH}px`; s.canvas.width = Math.round(cellW * dpr); s.canvas.height = Math.round(cellH * dpr); }
+      const r = s.el.getBoundingClientRect(); if (r.width < 2 || r.height < 2) continue;
+      if (s.view) s.view.resize(r.width, r.height);
+      if (s.canvas) { s.canvas.width = Math.round(r.width * dpr); s.canvas.height = Math.round(r.height * dpr); }
     }
   }
-  const onResize = () => { layoutPanels(); render(); drawAllCharts(); };
-  window.addEventListener('resize', onResize);
-  layoutBox.addEventListener('toggle', onResize);
+  const ro = observeSize(mapArea, () => { layoutPanels(); render(); drawAllCharts(); });
 
   // ---------------- data helpers
   const globalRange = (key) => { let lo = Infinity, hi = -Infinity; for (const p of P) { const [a, b] = p.range(key); lo = Math.min(lo, a); hi = Math.max(hi, b); } return [lo, hi]; };
@@ -139,7 +147,6 @@ export function mountCompare(container, projects) {
   const base = (t) => ({ t, dryThr: ui.dryThr, vec: ui.vec, vecStep: 3, vecScale: 6, basemap: ui.basemap, opacity: ui.opacity, probe, line: sectionLine() });
   const analysed = () => P.every((p) => p.analysis.done);
 
-  /** Difference field A - B at step t (nodes wet in either case). */
   async function diffField(A, B, t, key) {
     const [fa, fb] = await Promise.all([frame(A, t, key), frame(B, t, key)]);
     const n = ref.N, diff = new Float32Array(n), mask = new Float32Array(n);
@@ -162,8 +169,7 @@ export function mountCompare(container, projects) {
     try {
       const t = Math.min(tb.t, nt - 1), key = ui.var;
       const [lo, hi] = globalRange(key);
-      const lines = [`t = ${timeArr[t]} s   ${ref.label(key)} 共通レンジ ${fmtSig(lo)} – ${fmtSig(hi)} ${ref.unit(key)}`];
-      let legend = { cmap: ui.cmap, lo, hi, unit: `${ref.label(key)} [${ref.unit(key)}]` };
+      const lines = [];
       const frames = new Map();
       const getFrame = async (p) => { if (!frames.has(p)) frames.set(p, await frame(p, t, key)); return frames.get(p); };
       for (const s of slots) {
@@ -171,33 +177,29 @@ export function mountCompare(container, projects) {
         if (s.kind.startsWith('map:')) {
           const p = P[+s.kind.slice(4)]; const f = await getFrame(p);
           s.view.setProject(p);
-          s.view.draw({ ...base(t), ...f, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry, title: p.name });
+          s.view.draw({ ...base(t), ...f, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry, title: p.name, legendNote: `t = ${timeArr[t]} s` });
         } else if (s.kind === 'diff') {
           if (!sameGrid) { s.view.titleEl.textContent = '格子が異なるため差分不可'; s.view.titleEl.hidden = false; continue; }
           const A = P[ui.diffA], B = P[ui.diffB]; const D = await diffField(A, B, t, key); const lim = D.maxAbs || 1;
           s.view.setProject(A);
-          s.view.draw({ ...base(t), values: D.diff, depth: D.mask, u: null, w: null, label: `Δ${A.label(key)} (A−B)`, unit: A.unit(key), cmap: 5, vmin: -lim, vmax: lim, dryMask: ui.dry, dryThr: 0.5, title: `差分 ${A.name} − ${B.name}` });
-          legend = { cmap: 5, lo: -lim, hi: lim, unit: `Δ${ref.label(key)} [${ref.unit(key)}]（赤: A が大きい / 青: B が大きい）` };
-          lines.push(`差分 A=${A.name}, B=${B.name}: 平均差 ${fmt(D.mean)}, RMS ${fmt(D.rms)}, 最大|差| ${fmt(D.maxAbs)} ${ref.unit(key)}, 湿潤節点 A ${D.wetA} / B ${D.wetB}, 一致率(IoU) ${(100 * D.iou).toFixed(1)} %`);
+          s.view.draw({ ...base(t), values: D.diff, depth: D.mask, u: null, w: null, label: `Δ${A.label(key)}`, unit: A.unit(key), cmap: 5, vmin: -lim, vmax: lim, dryMask: ui.dry, dryThr: 0.5, title: `差分 ${A.name} − ${B.name}`, legendNote: '赤: A > B' });
+          lines.push(`差分 ${A.name} − ${B.name}: 平均差 ${fmt(D.mean)}, RMS ${fmt(D.rms)}, 最大|差| ${fmt(D.maxAbs)} ${ref.unit(key)}, 湿潤節点 A ${D.wetA} / B ${D.wetB}, 一致率(IoU) ${(100 * D.iou).toFixed(1)} %`);
         } else if (s.kind === 'ens') {
           if (!sameGrid || !analysed()) { s.view.titleEl.textContent = !sameGrid ? '格子が異なるため統合マップ不可' : '統合マップ: 「全ケース解析」を実行してください'; s.view.titleEl.hidden = false; continue; }
           const E = ensembleField(ui.ensemble);
           s.view.setProject(ref);
           s.view.draw({ ...base(t), values: E.data, depth: null, u: null, w: null, label: E.label, unit: E.unit, cmap: E.cmap, vmin: E.lo, vmax: E.hi, dryMask: false, title: E.label });
-          legend = { cmap: E.cmap, lo: E.lo, hi: E.hi, unit: `${E.label} [${E.unit}]` };
           lines.push(E.info);
         }
       }
-      drawLegend(legendBar, legend.cmap); lmin.textContent = fmtSig(legend.lo); lmax.textContent = fmtSig(legend.hi); lunit.textContent = legend.unit;
       info.textContent = lines.join('\n');
-      if (probe && slots.some((s) => s.kind === 'section')) await buildSection();   // section follows the current step
+      if (probe && slots.some((s) => s.kind === 'section')) await buildSection();
       drawAllCharts();
     } catch (e) { err.textContent = String(e); console.error(e); }
     rendering = false;
     if (pending) { pending = false; render(); }
   }
 
-  /** Ensemble fields across projects (same grid). */
   const ensCache = {};
   function ensembleField(kind) {
     if (ensCache[kind]) return ensCache[kind];
@@ -249,8 +251,8 @@ export function mountCompare(container, projects) {
     const rows = summaryRows();
     const tbl = h('table', { class: 'summary' }, h('thead', {}, h('tr', {}, SUMMARY_HEADER.map((x) => h('th', {}, x)))), h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c))))));
     const rel = P.slice(1).map((p) => { const a = P[0].analysis.summary, b = p.analysis.summary; return [`${p.name} / ${P[0].name}`, `${(100 * (b.peakArea / a.peakArea - 1)).toFixed(1)} %`, `${(100 * (b.peakVolume / a.peakVolume - 1)).toFixed(1)} %`, `${(100 * (b.maxDepth / a.maxDepth - 1)).toFixed(1)} %`, `${(100 * (b.maxSpeed / a.maxSpeed - 1)).toFixed(1)} %`]; });
-    const tbl2 = rel.length ? h('table', { class: 'summary', style: 'margin-top:6px' }, h('thead', {}, h('tr', {}, ['基準との比', '浸水面積', '貯留量', '最大水深', '最大流速'].map((x) => h('th', {}, x)))), h('tbody', {}, rel.map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))))) : null;
-    tableEl = h('div', {}, h('div', { class: 'sub', style: 'margin-bottom:4px' }, '要約（全ケース解析）'), tbl, tbl2 || '');
+    const tbl2 = rel.length ? h('table', { class: 'summary' }, h('thead', {}, h('tr', {}, ['基準との比', '浸水面積', '貯留量', '最大水深', '最大流速'].map((x) => h('th', {}, x)))), h('tbody', {}, rel.map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))))) : null;
+    tableEl = h('div', {}, h('div', { class: 'sub', style: 'margin-bottom:4px' }, '要約（全ケース解析）'), h('div', { class: 'tables' }, tbl, tbl2 || ''));
   }
   function fillTables() {
     for (const s of slots) if (s.kind === 'table') s.el.replaceChildren(tableEl ? tableEl.cloneNode(true) : h('div', { class: 'sub', style: 'padding:8px' }, '「全ケース解析」を実行すると要約表を表示します。'));
@@ -262,7 +264,6 @@ export function mountCompare(container, projects) {
     pointSpec = { x: Array.from(timeArr).slice(0, nt), series: P.map((p, k) => ({ name: p.name, y: Array.from(ys[k]).slice(0, nt), color: colors[k] })), xlabel: 't [s]', title: `地点時系列 ${ref.label(key)} [${ref.unit(key)}]  i=${i + 1}, j=${j + 1}`, legend: true };
     drawAllCharts();
   }
-  /** Cross / longitudinal section at the probe for the current step: bed + water surface of every case, plus the selected variable. */
   async function buildSection() {
     if (!probe || !sameGrid || ui.clickMode === 'ts') return;
     const { i, j } = probe, mode = ui.clickMode, t = Math.min(tb.t, nt - 1), key = ui.var;
@@ -308,7 +309,7 @@ export function mountCompare(container, projects) {
 
   // ---------------- report
   async function makeReport() {
-    tb.stop(); err.textContent = ''; prog.textContent = 'レポート作成中…';
+    tb.stop(); err.textContent = ''; rprog.textContent = 'レポート作成中…';
     if (!analysed()) await runAll();
     const t = Math.min(tb.t, nt - 1), key = ui.var, [lo, hi] = globalRange(key);
     const shot = { w: 1200, h: 720, view: null };
@@ -330,14 +331,14 @@ export function mountCompare(container, projects) {
       for (const kind of ['freq', 'envmax', 'arrmin', 'arrspread']) { const E = ensembleField(kind); eimgs.push({ dataUrl: await snapshotMap(ref, { ...base(t), values: E.data, depth: null, u: null, w: null, label: E.label, unit: E.unit, cmap: E.cmap, vmin: E.lo, vmax: E.hi, dryMask: false, title: E.label, probe: null }, shot), caption: `${E.label} [${E.unit}]  ${fmtSig(E.lo)} – ${fmtSig(E.hi)}` }); }
       sections.push({ title: '統合解析（全ケースの重ね合わせ）', images: eimgs, bullets: [ensembleField('freq').info] });
     }
-    sections.push({ title: '統計比較（浸水面積・貯留量・最大水深・最大流速）', images: [{ dataUrl: chartImage(statsSpec, 1600, 560) }], table: { header: SUMMARY_HEADER, rows: summaryRows() } });
+    sections.push({ title: '統計比較（浸水面積・貯留量・最大水深・最大流速）', images: [{ dataUrl: chartImage({ ...statsSpec, cols: 4 }, 1600, 560) }], table: { header: SUMMARY_HEADER, rows: summaryRows() } });
     if (pointSpec) sections.push({ title: pointSpec.title, images: [{ dataUrl: chartImage({ ...pointSpec, marker: timeArr[t] }) }] });
     if (sectionSpec) { await buildSection(); sections.push({ title: `断面比較: ${sectionSpec.label}  t = ${timeArr[sectionSpec.t]} s`, bullets: [`断面長 ${sectionSpec.length.toFixed(0)} m`, '水位は各ケースの乾燥部（水深 ≤ 閾値）を非表示', '並列表示の画像に断面位置（赤線）を表示'], images: [{ dataUrl: chartImage({ ...sectionSpec, cols: sectionSpec.panels.length }, 1600, 560) }] }); }
     const bytes = await downloadReport({ title: 'iRIC 計算結果 比較レポート', subtitle: `${P.map((p) => p.name).join(' / ')}\n作成日 ${today()}`, sections }, `compare_report_${today()}.pptx`);
-    prog.textContent = `レポートをダウンロードしました (${(bytes / 1024).toFixed(0)} KB)`;
+    rprog.textContent = bytes ? `レポートをダウンロードしました (${(bytes / 1024).toFixed(0)} KB)` : 'レポートをダウンロードしました';
   }
 
   applyLayout(layout);
   tb.set(Math.min(nt - 1, 90));
-  return { destroy() { tb.stop(); window.removeEventListener('resize', onResize); for (const s of slots) if (s.view) s.view.destroy(); container.replaceChildren(); } };
+  return { destroy() { tb.destroy(); ro.disconnect(); for (const s of slots) if (s.view) s.view.destroy(); content.replaceChildren(); } };
 }
