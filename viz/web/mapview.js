@@ -15,6 +15,7 @@ export const BASEMAPS = {
 };
 const tileCache = new Map();
 const tileWaiters = new Set();   // MapViews to re-render when a tile arrives
+window.__views = tileWaiters; window.__tiles = tileCache;   // debug hooks
 function getTile(src, z, x, y) {
   const n = 2 ** z;
   if (y < 0 || y >= n) return null;
@@ -153,6 +154,7 @@ export class MapView {
     if (this.pending) { this.pending = false; this.render(this.state); }
   }
   draw(s) {
+    this.state = s;
     const p = this.project, N = p.N, { W, H, view, ctx } = this;
     ensureScratch(N);
     f32(scratch.v, N).set(s.values);
@@ -205,15 +207,17 @@ export class MapView {
   }
   drawArrows(n) {
     const a = f32(scratch.arrows, n * 5), ctx = this.ctx, dpr = this.dpr;
-    ctx.save(); ctx.lineWidth = dpr; ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.beginPath();
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
     for (let k = 0; k < n; k++) {
       const x1 = a[k * 5], y1 = a[k * 5 + 1], x2 = a[k * 5 + 2], y2 = a[k * 5 + 3];
       ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
-      const ang = Math.atan2(y2 - y1, x2 - x1), hl = Math.min(6 * dpr, Math.hypot(x2 - x1, y2 - y1) * 0.4);
+      const ang = Math.atan2(y2 - y1, x2 - x1), hl = Math.min(7 * dpr, Math.max(3 * dpr, Math.hypot(x2 - x1, y2 - y1) * 0.4));
       ctx.moveTo(x2, y2); ctx.lineTo(x2 - hl * Math.cos(ang - 0.5), y2 - hl * Math.sin(ang - 0.5));
       ctx.moveTo(x2, y2); ctx.lineTo(x2 - hl * Math.cos(ang + 0.5), y2 - hl * Math.sin(ang + 0.5));
     }
-    ctx.stroke(); ctx.restore();
+    ctx.lineWidth = 3 * dpr; ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.stroke();   // halo
+    ctx.lineWidth = 1.2 * dpr; ctx.strokeStyle = this.state?.vecColor || '#111'; ctx.stroke();
+    ctx.restore();
   }
   drawLine(nodes) {
     const ctx = this.ctx; ctx.save(); ctx.lineWidth = 2 * this.dpr; ctx.strokeStyle = '#d0021b'; ctx.beginPath();

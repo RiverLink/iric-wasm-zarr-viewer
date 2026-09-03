@@ -5,7 +5,7 @@ import { MapView } from './mapview.js';
 import { drawChart, PALETTE } from './charts.js';
 import { h, select, labeled, check, num, timebar, observeSize, fmt, fmtSig, downloadText } from './ui.js';
 import { chartImage, snapshotMap, downloadReport, today } from './report.js';
-import { BASEMAP_OPTIONS } from './viewer.js';
+import { BASEMAP_OPTIONS, velMax } from './viewer.js';
 
 const CMAP_OPTIONS = [['0', 'viridis'], ['4', 'turbo'], ['1', 'jet'], ['2', 'blues'], ['3', 'terrain']];
 const LS_KEY = 'iric.compare.layout';
@@ -16,8 +16,9 @@ export function mountCompare({ stage, content, side }, projects) {
   const nt = Math.min(...P.map((p) => p.nt));
   const timeArr = ref.timeArr;
   const varNames = ref.varNames.filter((k) => P.every((p) => p.varNames.includes(k)));
-  const ui = { var: varNames.includes('Depth') ? 'Depth' : varNames[0], cmap: 2, dry: true, dryThr: 0.01, vec: false, basemap: ref.hasMerc ? 'gsi_pale' : 'none', opacity: 0.8,
-    diffA: 0, diffB: Math.min(1, N - 1), ensemble: 'freq', clickMode: 'ts', panelH: 0 };
+  const ui = { var: varNames.includes('Depth') ? 'Depth' : varNames[0], cmap: 2, dry: true, dryThr: 0.01, vec: P.every((p) => p.hasVel), vecStep: 3, vecScale: 6, vecAuto: true,
+    basemap: ref.hasMerc ? 'gsi_pale' : 'none', opacity: 0.8, diffA: 0, diffB: Math.min(1, N - 1), ensemble: 'freq', clickMode: 'ts', panelH: 0 };
+  const vmaxGlobal = Math.max(...P.map(velMax));
   let probe = null, pointSpec = null, statsSpec = null, sectionSpec = null, tableEl = null;
   const colors = P.map((_, k) => PALETTE[k % PALETTE.length]);
 
@@ -48,10 +49,12 @@ export function mountCompare({ stage, content, side }, projects) {
   const ensSel = select([['freq', '浸水頻度（浸水したケースの割合）'], ['envmax', '包絡最大水深（全ケースの最大）'], ['envmin', '最小の最大水深'], ['arrmin', '最早到達時間'], ['arrspread', '到達時間の幅（最遅 − 最早）']], 'freq', (v) => { ui.ensemble = v; render(); });
   const clickSel = select([['ts', '地点時系列'], ['xs', '横断面（i 一定, j 方向）'], ['ls', '縦断面（j 一定, i 方向）']], 'ts', (v) => { ui.clickMode = v; if (probe) onProbe(); render(); });
   const err = h('div', { class: 'err' });
+  const vecScaleIn = num(6, 1, (v) => { ui.vecScale = v; render(); }, 56); vecScaleIn.disabled = true; vecScaleIn.title = 'px / (m/s)';
   side.view.replaceChildren(
     labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('背景地図', bmSel), h('div', { class: 'row' }, '不透明度', opacity),
     check('乾燥セルを透過 / グレー', true, (v) => { ui.dry = v; render(); }), h('div', { class: 'row' }, '乾燥閾値 [m]', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); })),
-    check('流速ベクトル', false, (v) => { ui.vec = v; render(); }),
+    check('流速ベクトル', ui.vec, (v) => { ui.vec = v; render(); }),
+    h('div', { class: 'row' }, '間引き', num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56), '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; render(); })),
     h('div', { class: 'row', style: 'gap:4px' }, labeled('差分 A', selA), h('span', { style: 'padding-top:14px' }, '−'), labeled('B', selB)),
     labeled('統合指標', ensSel),
     sameGrid ? '' : h('span', { class: 'sub' }, '※ 格子が異なるため差分・統合マップ・地点/断面比較は使えません'), err);
@@ -144,7 +147,7 @@ export function mountCompare({ stage, content, side }, projects) {
     const [values, depth, u, w] = await Promise.all([p.get(key, t), p.arrays.Depth ? p.get('Depth', t) : null, wantVel ? p.get('Velocity_ms_1_X', t) : null, wantVel ? p.get('Velocity_ms_1_Y', t) : null]);
     return { values, depth, u, w };
   }
-  const base = (t) => ({ t, dryThr: ui.dryThr, vec: ui.vec, vecStep: 3, vecScale: 6, basemap: ui.basemap, opacity: ui.opacity, probe, line: sectionLine() });
+  const base = (t) => ({ t, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale, basemap: ui.basemap, opacity: ui.opacity, probe, line: sectionLine() });
   const analysed = () => P.every((p) => p.analysis.done);
 
   async function diffField(A, B, t, key) {

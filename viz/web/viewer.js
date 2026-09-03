@@ -8,10 +8,19 @@ import { chartImage, downloadReport, today } from './report.js';
 export const CMAP_OPTIONS = [['0', 'viridis'], ['4', 'turbo'], ['1', 'jet'], ['2', 'blues'], ['3', 'terrain'], ['5', 'RdBu']];
 export const BASEMAP_OPTIONS = [['gsi_pale', '地理院 淡色地図'], ['gsi_std', '地理院 標準地図'], ['gsi_photo', '地理院 航空写真'], ['gsi_hill', '地理院 陰影起伏図'], ['osm', 'OpenStreetMap'], ['none', 'なし']];
 
+/** Global maximum speed of a project (for automatic arrow scaling). */
+export function velMax(p) {
+  if (!p.hasVel) return 1;
+  if (p.arrays.Velocity_magnitude_Max) return Math.max(1e-6, p.range('Velocity_magnitude_Max')[1]);
+  const [a, b] = p.range('Velocity_ms_1_X'), [c, d] = p.range('Velocity_ms_1_Y');
+  return Math.max(1e-6, Math.hypot(Math.max(Math.abs(a), Math.abs(b)), Math.max(Math.abs(c), Math.abs(d))));
+}
+
 export function mountViewer({ stage, content, side }, project) {
   const p = project;
   const ui = { var: p.varNames.includes('Depth') ? 'Depth' : p.varNames[0], cmap: 2, range: 'global', vmin: 0, vmax: 1, dry: true, dryThr: 0.01,
-    vec: p.hasVel, vecStep: 3, vecScale: 6, grid: false, basemap: p.hasMerc ? 'gsi_pale' : 'none', opacity: 0.8, clickMode: 'ts', place: 'below' };
+    vec: p.hasVel, vecStep: 3, vecScale: 6, vecAuto: true, grid: false, basemap: p.hasMerc ? 'gsi_pale' : 'none', opacity: 0.8, clickMode: 'ts', place: 'below' };
+  const vmaxGlobal = velMax(p);
   try { ui.place = localStorage.getItem('iric.viewer.place') || 'below'; } catch {}
   if (ui.var !== 'Depth') ui.cmap = 0;
   let probe = null;
@@ -26,6 +35,7 @@ export function mountViewer({ stage, content, side }, project) {
   const bmSel = select(BASEMAP_OPTIONS, ui.basemap, (v) => { ui.basemap = v; render(); }); bmSel.disabled = !p.hasMerc;
   const opacity = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: ui.opacity, style: 'flex:1', oninput: (e) => { ui.opacity = +e.target.value; render(); } });
   const stats = h('div', { class: 'stats' }), err = h('div', { class: 'err' });
+  const vecScaleIn = num(6, 1, (v) => { ui.vecScale = v; render(); }, 56); vecScaleIn.disabled = true; vecScaleIn.title = 'px / (m/s)';
   side.view.replaceChildren(
     labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('レンジ', rangeSel),
     h('div', { class: 'row' }, 'min', vmin, 'max', vmax),
@@ -33,7 +43,7 @@ export function mountViewer({ stage, content, side }, project) {
     check('乾燥セルをグレー表示', true, (v) => { ui.dry = v; render(); }),
     h('div', { class: 'row' }, '乾燥閾値 [m]', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); })),
     check('流速ベクトル', ui.vec, (v) => { ui.vec = v; render(); }),
-    h('div', { class: 'row' }, '間引き', num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56), '倍率', num(6, 1, (v) => { ui.vecScale = v; render(); }, 56)),
+    h('div', { class: 'row' }, '間引き', num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56), '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; render(); })),
     check('格子線', false, (v) => { ui.grid = v; render(); }),
     stats, err);
 
@@ -86,7 +96,7 @@ export function mountViewer({ stage, content, side }, project) {
       else { lo = ui.vmin; hi = ui.vmax; }
       if (ui.range !== 'manual') { vmin.value = fmtSig(lo); vmax.value = fmtSig(hi); }
       const line = probe && (ui.clickMode === 'xs' || ui.clickMode === 'ls') ? p.sectionNodes(probe.i, probe.j, ui.clickMode) : null;
-      await map.render({ t, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry && !derived, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecStep, vecScale: ui.vecScale,
+      await map.render({ t, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry && !derived, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale,
         grid: ui.grid, basemap: ui.basemap, opacity: ui.opacity, values, depth, u, w, probe, line, legendNote: `t = ${p.timeArr[t]} s` });
       if (charts.section && probe) await buildSection();
       drawCurrentChart();
