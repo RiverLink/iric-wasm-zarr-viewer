@@ -65,7 +65,7 @@ def upsert_scan(entry, root):
                      VALUES (:name, :path, :kind, :size, :mtime, :solver, :solverVersion, :crs, :error, :root)
                      ON CONFLICT(name) DO UPDATE SET path=excluded.path, kind=excluded.kind, size=excluded.size, mtime=excluded.mtime,
                      solver=COALESCE(excluded.solver, solver), solver_version=COALESCE(excluded.solver_version, solver_version), crs=COALESCE(excluded.crs, crs),
-                     error=COALESCE(excluded.error, error), root=excluded.root""",   -- conversion errors survive rescans; a successful conversion clears them
+                     error=COALESCE(excluded.error, error), root=excluded.root""",   # conversion errors survive rescans; a successful conversion clears them
                   {**{k: entry.get(k) for k in ("name", "path", "kind", "size", "mtime", "solver", "solverVersion", "crs", "error")}, "root": root})
         # a newer source file invalidates the conversion flag
         c.execute("UPDATE projects SET converted = 0 WHERE name = ? AND converted_at IS NOT NULL AND mtime > converted_at", (entry["name"],))
