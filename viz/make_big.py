@@ -1,43 +1,40 @@
 """Create a LARGE synthetic CGNS-like HDF5 file (iRIC layout) for scale testing of the streaming converter.
 
-The grid of ../extracted/Case1.cgn is tiled TILE x TILE times (shifted copies) and the results are
-copied per tile with a small scaling, so the file grows ~TILE^2 x while remaining a valid input for
-convert.py.  Only the datasets the converter reads are written.  Output: ../projects_big/big_<TILE>x<TILE>/
+The grid of ../extracted/Case1.cgn is refined REFINE x REFINE times by bilinear interpolation of the
+node coordinates and of every result field, so the geometry stays realistic (no artificial cells) while
+the file grows ~REFINE^2 x.  Only the datasets the converter reads are written.
+Output: ../projects_big/big_r<REFINE>/  (project.xml + Case1.cgn)
 
-  python make_big.py [TILE=3] [STEPS=181]
+  python make_big.py [REFINE=3] [STEPS=181]
 """
-import os, sys, time, shutil
+import os, sys, time
 import numpy as np, h5py
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "extracted", "Case1.cgn")
-TILE = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+R = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 STEPS = int(sys.argv[2]) if len(sys.argv) > 2 else 181
-OUT_DIR = os.path.join(HERE, "..", "projects_big", f"big_{TILE}x{TILE}")
+OUT_DIR = os.path.join(HERE, "..", "projects_big", f"big_r{R}")
 os.makedirs(OUT_DIR, exist_ok=True)
 OUT = os.path.join(OUT_DIR, "Case1.cgn")
 
 src = h5py.File(SRC, "r")
 zone = src["iRIC/iRICZone"]
 ni, nj = [int(v) for v in zone[" data"][()][0]]
-x = zone["GridCoordinates/CoordinateX/ data"][()]; y = zone["GridCoordinates/CoordinateY/ data"][()]
-dx, dy = x.max() - x.min(), y.max() - y.min()
-NI, NJ = ni * TILE, nj * TILE
+NI, NJ = (ni - 1) * R + 1, (nj - 1) * R + 1
+# bilinear interpolation weights (separable)
+fi = np.arange(NI) / R; fj = np.arange(NJ) / R
+i0 = np.minimum(fi.astype(int), ni - 2); wi = fi - i0
+j0 = np.minimum(fj.astype(int), nj - 2); wj = fj - j0
 
 
-def tile(a, scale=1.0):
-    out = np.empty((NJ, NI), dtype=a.dtype)
-    for r in range(TILE):
-        for c in range(TILE):
-            out[r * nj:(r + 1) * nj, c * ni:(c + 1) * ni] = a * (scale ** (r + c))
-    return out
+def refine(a):
+    a = np.asarray(a, dtype=np.float64)
+    ax = a[:, i0] * (1 - wi) + a[:, i0 + 1] * wi          # along i
+    return ax[j0, :] * (1 - wj)[:, None] + ax[j0 + 1, :] * wj[:, None]   # along j
 
 
-X = np.empty((NJ, NI)); Y = np.empty((NJ, NI))
-for r in range(TILE):
-    for c in range(TILE):
-        X[r * nj:(r + 1) * nj, c * ni:(c + 1) * ni] = x + c * dx * 1.02
-        Y[r * nj:(r + 1) * nj, c * ni:(c + 1) * ni] = y + r * dy * 1.02
+X = refine(zone["GridCoordinates/CoordinateX/ data"][()]); Y = refine(zone["GridCoordinates/CoordinateY/ data"][()])
 sols = sorted([k for k in zone if k.startswith("FlowSolution")], key=lambda k: int(k[12:]))[:STEPS]
 vars_ = [k for k in zone[sols[0]] if not k.startswith(" ") and " data" in zone[sols[0]][k]]
 t0 = time.time()
@@ -50,7 +47,7 @@ with h5py.File(OUT, "w") as f:
         fs = z.create_group(s)
         for v in vars_:
             a = zone[s][v][" data"][()]
-            fs.create_dataset(v + "/ data", data=tile(a, 1.0 if v in ("Elevation", "IBC") else 1.05))
+            fs.create_dataset(v + "/ data", data=refine(a) if a.dtype.kind == "f" else np.repeat(np.repeat(a, R, axis=0), R, axis=1)[:NJ, :NI])
         if t % 20 == 0: print(f"  step {t + 1}/{len(sols)}  {time.time() - t0:.0f} s", flush=True)
 open(os.path.join(OUT_DIR, "project.xml"), "w", encoding="utf-8").write(
     '<?xml version="1.0" encoding="UTF-8"?>\n<iRICProject version="4.2.0.6981" solverName="naysflood" solverVersion="5.0.240119" coordinateSystem="EPSG:2454">'

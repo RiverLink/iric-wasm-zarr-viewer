@@ -50,11 +50,12 @@ export function mountCompare({ stage, content, side }, projects) {
   const clickSel = select([['ts', '地点時系列'], ['xs', '横断面（i 一定, j 方向）'], ['ls', '縦断面（j 一定, i 方向）']], 'ts', (v) => { ui.clickMode = v; if (probe) onProbe(); render(); });
   const err = h('div', { class: 'err' });
   const vecScaleIn = num(6, 1, (v) => { ui.vecScale = v; render(); }, 56); vecScaleIn.disabled = true; vecScaleIn.title = 'px / (m/s)';
+  const vecStepIn = num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56); vecStepIn.disabled = true;
   side.view.replaceChildren(
     labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('背景地図', bmSel), h('div', { class: 'row' }, '不透明度', opacity),
     check('乾燥セルを透過 / グレー', true, (v) => { ui.dry = v; render(); }), h('div', { class: 'row' }, '乾燥閾値 [m]', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); })),
     check('流速ベクトル', ui.vec, (v) => { ui.vec = v; render(); }),
-    h('div', { class: 'row' }, '間引き', num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56), '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; render(); })),
+    h('div', { class: 'row' }, '間引き', vecStepIn, '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; vecStepIn.disabled = v; render(); })),
     h('div', { class: 'row', style: 'gap:4px' }, labeled('差分 A', selA), h('span', { style: 'padding-top:14px' }, '−'), labeled('B', selB)),
     labeled('統合指標', ensSel),
     sameGrid ? '' : h('span', { class: 'sub' }, '※ 格子が異なるため差分・統合マップ・地点/断面比較は使えません'), err);
@@ -147,7 +148,7 @@ export function mountCompare({ stage, content, side }, projects) {
     const [values, depth, u, w] = await Promise.all([p.get(key, t), p.arrays.Depth ? p.get('Depth', t) : null, wantVel ? p.get('Velocity_ms_1_X', t) : null, wantVel ? p.get('Velocity_ms_1_Y', t) : null]);
     return { values, depth, u, w };
   }
-  const base = (t) => ({ t, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale, basemap: ui.basemap, opacity: ui.opacity, probe, line: sectionLine() });
+  const base = (t) => ({ t, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecAuto ? 'auto' : ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale, basemap: ui.basemap, opacity: ui.opacity, probe, line: sectionLine() });
   const analysed = () => P.every((p) => p.analysis.done);
 
   async function diffField(A, B, t, key) {

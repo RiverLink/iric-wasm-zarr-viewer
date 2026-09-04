@@ -36,6 +36,7 @@ export class Project {
     if (!shared.origin) shared.origin = [(x0 + x1) / 2, (y0 + y1) / 2];
     const o = shared.origin;
     p.bbox = [x0 - o[0], y0 - o[1], x1 - o[0], y1 - o[1]];
+    p.cellSize = Math.sqrt(((x1 - x0) * (y1 - y0)) / p.NC);   // mean cell size in render units (for arrow thinning)
     p.timeArr = await (await root.array('time')).getAll();
     p.varNames = Object.keys(A.variables).filter((k) => k !== 'IBC');
     p.labels = { ...A.variables };

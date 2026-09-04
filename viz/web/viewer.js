@@ -36,6 +36,7 @@ export function mountViewer({ stage, content, side }, project) {
   const opacity = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: ui.opacity, style: 'flex:1', oninput: (e) => { ui.opacity = +e.target.value; render(); } });
   const stats = h('div', { class: 'stats' }), err = h('div', { class: 'err' });
   const vecScaleIn = num(6, 1, (v) => { ui.vecScale = v; render(); }, 56); vecScaleIn.disabled = true; vecScaleIn.title = 'px / (m/s)';
+  const vecStepIn = num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56); vecStepIn.disabled = true; vecStepIn.title = '節点の間引き間隔';
   side.view.replaceChildren(
     labeled('変数', varSel), labeled('カラーマップ', cmapSel), labeled('レンジ', rangeSel),
     h('div', { class: 'row' }, 'min', vmin, 'max', vmax),
@@ -43,7 +44,7 @@ export function mountViewer({ stage, content, side }, project) {
     check('乾燥セルをグレー表示', true, (v) => { ui.dry = v; render(); }),
     h('div', { class: 'row' }, '乾燥閾値 [m]', num(0.01, 0.01, (v) => { ui.dryThr = v; render(); })),
     check('流速ベクトル', ui.vec, (v) => { ui.vec = v; render(); }),
-    h('div', { class: 'row' }, '間引き', num(3, 1, (v) => { ui.vecStep = Math.max(1, v | 0); render(); }, 56), '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; render(); })),
+    h('div', { class: 'row' }, '間引き', vecStepIn, '倍率', vecScaleIn, check('自動', true, (v) => { ui.vecAuto = v; vecScaleIn.disabled = v; vecStepIn.disabled = v; render(); })),
     check('格子線', false, (v) => { ui.grid = v; render(); }),
     stats, err);
 
@@ -96,7 +97,7 @@ export function mountViewer({ stage, content, side }, project) {
       else { lo = ui.vmin; hi = ui.vmax; }
       if (ui.range !== 'manual') { vmin.value = fmtSig(lo); vmax.value = fmtSig(hi); }
       const line = probe && (ui.clickMode === 'xs' || ui.clickMode === 'ls') ? p.sectionNodes(probe.i, probe.j, ui.clickMode) : null;
-      await map.render({ t, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry && !derived, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale,
+      await map.render({ t, label: p.label(key), unit: p.unit(key), cmap: ui.cmap, vmin: lo, vmax: hi, dryMask: ui.dry && !derived, dryThr: ui.dryThr, vec: ui.vec, vecStep: ui.vecAuto ? 'auto' : ui.vecStep, vecScale: ui.vecAuto ? 36 / vmaxGlobal : ui.vecScale,
         grid: ui.grid, basemap: ui.basemap, opacity: ui.opacity, values, depth, u, w, probe, line, legendNote: `t = ${p.timeArr[t]} s` });
       if (charts.section && probe) await buildSection();
       drawCurrentChart();
@@ -114,7 +115,7 @@ export function mountViewer({ stage, content, side }, project) {
     const k0 = p.node(i, j);
     if (ui.clickMode === 'ts') {
       dr.info.textContent = `時系列を読込中 (i=${i + 1}, j=${j + 1}) …`;
-      const keys = [ui.var]; if (ui.var !== 'Depth' && p.arrays.Depth) keys.push('Depth');
+      const keys = p.derived.has(ui.var) ? ['Depth'] : [ui.var]; if (ui.var !== 'Depth' && !p.derived.has(ui.var) && p.arrays.Depth) keys.push('Depth');
       const ys = await Promise.all(keys.map((k) => p.timeseries(k, k0)));
       const series = keys.map((k, n) => ({ name: `${p.label(k)} [${p.unit(k)}]`, y: Array.from(ys[n]), color: n ? '#1f77b4' : '#d62728' }));
       charts.ts = { x: Array.from(p.timeArr), series, xlabel: 't [s]', title: `地点時系列  i=${i + 1}, j=${j + 1}  (${p.origX[k0].toFixed(1)}, ${p.origY[k0].toFixed(1)})`, legend: true };

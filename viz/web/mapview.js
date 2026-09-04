@@ -24,7 +24,7 @@ function getTile(src, z, x, y) {
   let img = tileCache.get(key);
   if (img) return img;
   img = new Image(); img.crossOrigin = 'anonymous'; img.decoding = 'async';
-  img.onload = () => { for (const v of tileWaiters) v.rerender(); };
+  img.onload = () => { for (const v of tileWaiters) v.recomposite(); };
   img.onerror = () => { img.failed = true; };
   img.src = BASEMAPS[src].url(z, x, y);
   if (tileCache.size > 800) tileCache.delete(tileCache.keys().next().value);
@@ -144,6 +144,23 @@ export class MapView {
 
   // ------------------------------------------------------------ rendering
   rerender() { if (this.state) this.render(this.state); }
+  /** Redraw tiles + cached result layer + overlays without re-rasterizing (used when basemap tiles arrive). */
+  recomposite() {
+    if (!this.state || !this.frame) return;
+    if (this._recompQueued) return;
+    this._recompQueued = true;
+    requestAnimationFrame(() => { this._recompQueued = false; try { this.composite(this.state); } catch (e) { console.error(e); } });
+  }
+  composite(s) {
+    const { W, H, ctx } = this, p = this.project, withMap = s.basemap && s.basemap !== 'none' && p.hasMerc;
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    this.tilesPending = withMap ? this.drawTiles(s.basemap) : 0;
+    ctx.globalAlpha = withMap ? (s.opacity ?? 0.8) : 1; ctx.drawImage(this.res, 0, 0); ctx.globalAlpha = 1;
+    if (this.frame.arrows) this.drawArrows(this.frame.arrows);
+    if (s.line) this.drawLine(s.line);
+    if (s.probe) this.drawProbe(s.probe);
+    if (s.overlay) s.overlay(ctx, this);
+  }
   /** state: { t, label, unit, cmap, vmin, vmax, dryMask, dryThr, vec, vecStep, vecScale, grid, basemap, opacity,
    *           values, depth, u, w, probe {i,j}, line [nodes], title, legendNote, hideLegend } */
   async render(state) {
@@ -168,17 +185,14 @@ export class MapView {
       view.ox, view.oy, view.scale, s.vmin, s.vmax, s.cmap, s.dryThr ?? 0.01, dryColor, fb.rgba, fb.cell);
     if (s.grid) W_.gridLines(p.ptr.x, p.ptr.y, p.ni, p.nj, W, H, view.ox, view.oy, view.scale, 1, 0x60303030, fb.rgba);
     let nArrows = 0;
-    if (s.vec && s.u && s.w) nArrows = W_.arrows(p.ptr.x, p.ptr.y, scratch.u, scratch.w, s.depth ? scratch.d : 0, p.ni, p.nj, s.vecStep || 3, view.ox, view.oy, view.scale, (s.vecScale || 6) * this.dpr, s.dryThr ?? 0.01, scratch.arrows, N);
+    const vecStep = s.vecStep === 'auto' ? Math.max(1, Math.round(16 * this.dpr / (view.scale * (p.cellSize || 1)))) : (s.vecStep || 3);   // ~16 px between arrows
+    this.vecStep = vecStep;
+    if (s.vec && s.u && s.w) nArrows = W_.arrows(p.ptr.x, p.ptr.y, scratch.u, scratch.w, s.depth ? scratch.d : 0, p.ni, p.nj, vecStep, view.ox, view.oy, view.scale, (s.vecScale || 6) * this.dpr, s.dryThr ?? 0.01, scratch.arrows, N);
     this.wasmMs = performance.now() - t0; this.cells = cells; this.nArrows = nArrows;
     this.cellMap = i32(fb.cell, W * H).slice();
-    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
-    this.tilesPending = withMap ? this.drawTiles(s.basemap) : 0;
     this.resCtx.putImageData(new ImageData(u8c(fb.rgba, W * H * 4).slice(), W, H), 0, 0);
-    ctx.globalAlpha = withMap ? (s.opacity ?? 0.8) : 1; ctx.drawImage(this.res, 0, 0); ctx.globalAlpha = 1;
-    if (nArrows) this.drawArrows(nArrows);
-    if (s.line) this.drawLine(s.line);
-    if (s.probe) this.drawProbe(s.probe);
-    if (s.overlay) s.overlay(ctx, this);
+    this.frame = { arrows: nArrows ? f32(scratch.arrows, nArrows * 5).slice() : null };   // cached for recomposite()
+    this.composite(s);
     this.attr.textContent = withMap ? BASEMAPS[s.basemap].attr : ''; this.attr.hidden = !withMap;
     this.titleEl.textContent = s.title || ''; this.titleEl.hidden = !s.title;
     if (s.hideLegend || !Number.isFinite(s.vmin)) this.legend.hidden = true;
@@ -205,8 +219,8 @@ export class MapView {
     }
     return pending;
   }
-  drawArrows(n) {
-    const a = f32(scratch.arrows, n * 5), ctx = this.ctx, dpr = this.dpr;
+  drawArrows(a) {
+    const n = a.length / 5, ctx = this.ctx, dpr = this.dpr;
     ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
     for (let k = 0; k < n; k++) {
       const x1 = a[k * 5], y1 = a[k * 5 + 1], x2 = a[k * 5 + 2], y2 = a[k * 5 + 3];
