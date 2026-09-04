@@ -87,6 +87,7 @@ class StreamAnalyzer:
 
     def step(self, t, depth, u=None, v=None):
         depth = np.asarray(depth, dtype=np.float32)
+        depth = np.where(np.isfinite(depth), depth, 0)               # NaN / inf never count as wet
         cm = cell_mean(depth); wet = cm > self.thr
         self.series["wet_area_m2"].append(float(self.area[wet].sum()))
         self.series["volume_m3"].append(float((self.area * cm)[wet].sum()))
@@ -95,7 +96,8 @@ class StreamAnalyzer:
         if u is not None and v is not None:
             self.has_vel = True
             sp = np.hypot(np.asarray(u, dtype=np.float32), np.asarray(v, dtype=np.float32))
-            self.series["max_speed_ms"].append(float(sp[nwet].max()) if nwet.any() else 0.0)
+            ok = nwet & np.isfinite(sp)
+            self.series["max_speed_ms"].append(float(sp[ok].max()) if ok.any() else 0.0)
         else:
             self.series["max_speed_ms"].append(None)
         first = nwet & ~np.isfinite(self.arrival)

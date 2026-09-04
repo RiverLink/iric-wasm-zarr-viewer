@@ -57,11 +57,12 @@
   #plist { border-collapse:collapse; width:100%; font-size:12px; }
   #plist td { padding:3px 4px; border-bottom:1px solid var(--line); vertical-align:middle; }
   #plist tr.sel { background:#eaf1ff; }
-  #plist td.name { max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #plist td.st { white-space:nowrap; color:var(--muted); font-size:11.5px; }
-  #plist td.st .ok { color:var(--ok); }
-  #plist td.st .run { color:var(--accent); }
-  #plist td.st .bad { color:var(--danger); }
+  #plist td.entry { max-width:255px; }
+  #plist .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #plist .meta { color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #plist .st .ok { color:var(--ok); }
+  #plist .st .run { color:var(--accent); }
+  #plist .st .bad { color:var(--danger); }
   #plist .bar { display:inline-block; width:52px; height:6px; border:1px solid var(--line); border-radius:3px; vertical-align:middle; overflow:hidden; background:#fff; }
   #plist .bar i { display:block; height:100%; background:var(--accent); }
   #storage { font-size:11.5px; color:var(--muted); }

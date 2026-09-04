@@ -90,7 +90,7 @@ function addLocalFiles(files) {
 // ---------------- list
 const PH = { queued: '待機', start: '開始', extract: '展開', convert: '変換', finalize: '仕上げ', done: '完了', error: 'エラー', cancelled: '中止' };
 function statusCell(p) {
-  const td = document.createElement('td'); td.className = 'st';
+  const td = document.createElement('span'); td.className = 'st';
   if (p.job) {
     const j = p.job, pct = j.nt ? Math.round(100 * j.step / j.nt) : 0;
     td.innerHTML = j.state === 'queued' ? '<span class="run">キュー待ち</span>' : `<span class="run">${PH[j.phase] || j.phase} ${j.nt ? pct + '%' : ''}</span> <span class="bar"><i style="width:${pct}%"></i></span>`;
@@ -114,9 +114,13 @@ function renderList() {
     cb.addEventListener('change', () => { cb.checked ? selected.add(p.name) : selected.delete(p.name); updateButtons(); tr.classList.toggle('sel', cb.checked); });
     const tr = document.createElement('tr'); tr.classList.toggle('sel', cb.checked);
     const td0 = document.createElement('td'); td0.append(cb);
-    const td1 = document.createElement('td'); td1.className = 'name'; td1.textContent = p.name;
-    const td2 = document.createElement('td'); td2.className = 'st'; td2.textContent = `${KIND[p.kind] || p.kind}${p.kind.startsWith('local') ? '·L' : ''} ${p.solver ? p.solver.slice(0, 10) : ''}`;
-    tr.append(td0, td1, td2, statusCell(p));
+    const td1 = document.createElement('td'); td1.className = 'entry';
+    const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = p.name;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    const kind = document.createElement('span'); kind.className = 'kind'; kind.textContent = `${KIND[p.kind] || p.kind}${p.kind.startsWith('local') ? '·ローカル' : ''} ${p.solver ? p.solver.slice(0, 12) : ''}`;
+    meta.append(kind, ' ', statusCell(p));
+    td1.append(nm, meta);
+    tr.append(td0, td1);
     tr.title = [p.name, p.path, p.solver && `${p.solver} ${p.solverVersion || ''}`, p.crs, p.meta && `${p.meta.ni}×${p.meta.nj} 節点 · ${p.meta.nt} ステップ`, p.peak_area_m2 != null && `浸水面積 最大 ${(p.peak_area_m2 / 1e6).toFixed(3)} km²`, p.error].filter(Boolean).join('\n');
     tr.addEventListener('dblclick', () => { selected = new Set([p.name]); renderList(); openSelected('view'); });
     plist.append(tr);

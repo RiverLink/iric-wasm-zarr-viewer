@@ -229,6 +229,14 @@ def pick_folder(initial):
             root.destroy()
 
 
+def _finite(o):
+    """Replace NaN / Infinity (invalid in JSON) with null, recursively."""
+    if isinstance(o, float): return o if np.isfinite(o) else None
+    if isinstance(o, dict): return {k: _finite(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)): return [_finite(v) for v in o]
+    return o
+
+
 def b64f32(a):
     return base64.b64encode(np.ascontiguousarray(np.asarray(a, dtype=np.float32)).tobytes()).decode()
 
@@ -250,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers
     def send_json(self, obj, status=200):
-        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(_finite(obj), ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
