@@ -75,15 +75,20 @@ async function convertCgns(buf, info, name, onProgress) {
     const first = f.get(`iRIC/iRICZone/${sols[0]}`);
     const vars = first.keys().filter((k) => !k.startsWith(' ') && first.get(k).keys && first.get(k).keys().includes(' data'));
     const results = {}, variables = {};
+    const same = (a, b) => { if (a.length !== b.length) return false; for (let k = 0; k < a.length; k++) if (a[k] !== b[k] && !(a[k] !== a[k] && b[k] !== b[k])) return false; return true; };
     for (const [vi, v] of vars.entries()) {
       const key = safe(v); variables[key] = v;
-      const data = new Float32Array(nt * N); let lo = Infinity, hi = -Infinity;
-      for (let t = 0; t < nt; t++) {
-        const a = f.get(`iRIC/iRICZone/${sols[t]}/${v}/ data`).value;
+      const a0 = f.get(`iRIC/iRICZone/${sols[0]}/${v}/ data`).value;
+      // time-invariant variables (e.g. Elevation) are stored once
+      const isStatic = nt > 2 && same(a0, f.get(`iRIC/iRICZone/${sols[nt - 1]}/${v}/ data`).value) && same(a0, f.get(`iRIC/iRICZone/${sols[nt >> 1]}/${v}/ data`).value);
+      const steps = isStatic ? 1 : nt;
+      const data = new Float32Array(steps * N); let lo = Infinity, hi = -Infinity;
+      for (let t = 0; t < steps; t++) {
+        const a = t === 0 ? a0 : f.get(`iRIC/iRICZone/${sols[t]}/${v}/ data`).value;
         for (let k = 0; k < N; k++) { const val = a[k]; data[t * N + k] = val; if (val === val) { if (val < lo) lo = val; if (val > hi) hi = val; } }
-        if (onProgress && t % 20 === 0) { onProgress(`変換中 ${v} ${t + 1}/${nt}`, (vi + t / nt) / vars.length); await new Promise((r) => setTimeout(r)); }
+        if (onProgress && t % 20 === 0) { onProgress(`変換中 ${v} ${t + 1}/${steps}`, (vi + t / steps) / vars.length); await new Promise((r) => setTimeout(r)); }
       }
-      results[key] = { data, min: lo, max: hi, original_name: v };
+      results[key] = { data, steps, min: lo, max: hi, original_name: v };
     }
     let mx = null, my = null, bbox3857 = null, center = null;
     const tr = toMercator(x, y, info.crs);
@@ -132,8 +137,10 @@ export function localProjectsFromFiles(files) {
 }
 
 /** Convert (or restore from IndexedDB) a local project entry -> MemGroup. */
+export const BROWSER_SOFT_LIMIT_MB = 1500;   // above this, recommend the server mode (memory: file + arrays)
 export async function openLocalProject(entry, onProgress = () => {}) {
   const key = `${entry.kind}|${entry.path}|${entry.size}|${Math.round(entry.mtime)}`;
+  if (entry.size / 1048576 > BROWSER_SOFT_LIMIT_MB) onProgress(`注意: ${(entry.size / 1048576).toFixed(0)} MB はブラウザ内変換の目安 (${BROWSER_SOFT_LIMIT_MB} MB) を超えています。メモリ不足で失敗する場合は server.py のサーバーモードをお使いください`, 0.01);
   const cached = await cacheGet(key);
   if (cached) { onProgress('キャッシュから読込', 1); return new MemGroup(cached); }
   let info = { solver: '', solverVersion: '', crs: null, cgns: 'Case1' }, cgnBuf = null;

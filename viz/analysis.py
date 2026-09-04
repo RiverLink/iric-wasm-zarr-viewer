@@ -1,16 +1,19 @@
 """Server-side (numpy) analysis of converted iRIC results — the same definitions as the browser/wasm
-kernels, so the MCP tools and the web viewer agree.
+kernels, so the MCP tools, the HTTP API and the web viewer agree.
+
+Everything works one time step at a time (StreamAnalyzer) so memory does not depend on the number of
+steps: the converter feeds it while streaming a CGNS file, and the API feeds it from the Zarr cache.
 
 Conventions
   * arrays are (nj, ni) node-based, C order; i, j in the public API are 1-based (iRIC style)
   * a cell is wet when the mean of its 4 node depths exceeds `thr`; a node is wet when depth > thr
   * areas / distances use the project CRS coordinates (metres); Web Mercator only for drawing
 """
-import os, re, json, math, functools
+import os, re, json, math
 import numpy as np, zarr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE = os.path.join(HERE, "cache")
+CACHE = os.environ.get("IRIC_CACHE_DIR") or os.path.join(HERE, "cache")
 
 
 def safe(name):
@@ -25,6 +28,94 @@ UNITS = {"Depth": "m", "Depth_Max": "m", "Elevation": "m", "WaterSurfaceElevatio
          "Velocity_ms_1_X": "m/s", "Velocity_ms_1_Y": "m/s", "Velocity_magnitude_Max": "m/s"}
 
 
+def cell_areas(x, y):
+    """Planar cell areas (shoelace on the 4 nodes) of a (nj, ni) grid, shape (nj-1, ni-1)."""
+    x = np.asarray(x, dtype=np.float64); y = np.asarray(y, dtype=np.float64)
+    xa, ya = x[:-1, :-1], y[:-1, :-1]; xb, yb = x[:-1, 1:], y[:-1, 1:]
+    xc, yc = x[1:, 1:], y[1:, 1:]; xd, yd = x[1:, :-1], y[1:, :-1]
+    return 0.5 * np.abs((xa * yb - xb * ya) + (xb * yc - xc * yb) + (xc * yd - xd * yc) + (xd * ya - xa * yd))
+
+
+def cell_mean(a):
+    return 0.25 * (a[:-1, :-1] + a[:-1, 1:] + a[1:, 1:] + a[1:, :-1])
+
+
+class StreamAnalyzer:
+    """Whole-run flood statistics accumulated one step at a time.
+    Call step(t, depth, u, v) for t = 0..nt-1 (u, v may be None), then finish()."""
+
+    def __init__(self, x, y, time, thr=0.01):
+        self.area = cell_areas(x, y); self.total_area = float(self.area.sum())
+        self.time = np.asarray(time, dtype=np.float64); self.nt = len(self.time); self.thr = float(thr)
+        nj, ni = np.asarray(x).shape
+        self.arrival = np.full((nj, ni), np.nan, dtype=np.float32)
+        self.duration = np.zeros((nj, ni), dtype=np.float32)
+        self.dmax = np.zeros((nj, ni), dtype=np.float32)
+        self.series = {"time_s": self.time.tolist(), "wet_area_m2": [], "volume_m3": [], "max_depth_m": [], "max_speed_ms": []}
+        self.has_vel = False
+
+    def dt(self, t):
+        if self.nt < 2: return 0.0
+        return float(self.time[t + 1] - self.time[t]) if t + 1 < self.nt else float(self.time[t] - self.time[t - 1])
+
+    def step(self, t, depth, u=None, v=None):
+        depth = np.asarray(depth, dtype=np.float32)
+        cm = cell_mean(depth); wet = cm > self.thr
+        self.series["wet_area_m2"].append(float(self.area[wet].sum()))
+        self.series["volume_m3"].append(float((self.area * cm)[wet].sum()))
+        nwet = depth > self.thr
+        self.series["max_depth_m"].append(float(depth[nwet].max()) if nwet.any() else 0.0)
+        if u is not None and v is not None:
+            self.has_vel = True
+            sp = np.hypot(np.asarray(u, dtype=np.float32), np.asarray(v, dtype=np.float32))
+            self.series["max_speed_ms"].append(float(sp[nwet].max()) if nwet.any() else 0.0)
+        else:
+            self.series["max_speed_ms"].append(None)
+        first = nwet & ~np.isfinite(self.arrival)
+        self.arrival[first] = self.time[t] / 60.0
+        self.duration[nwet] += self.dt(t) / 60.0
+        np.maximum(self.dmax, np.where(nwet, depth, 0), out=self.dmax)
+
+    def finish(self):
+        a = np.array(self.series["wet_area_m2"]); pk = int(a.argmax()) if a.size else 0
+        ever = np.isfinite(self.arrival)
+        ms = [s for s in self.series["max_speed_ms"] if s is not None]
+        if not self.has_vel: self.series["max_speed_ms"] = None
+        summary = {"threshold_m": self.thr, "peak_wet_area_m2": float(a[pk]) if a.size else 0.0, "peak_wet_area_time_s": float(self.time[pk]) if a.size else 0.0,
+                   "peak_wet_area_fraction": float(a[pk] / self.total_area) if a.size else 0.0, "final_wet_area_m2": float(a[-1]) if a.size else 0.0,
+                   "peak_volume_m3": float(max(self.series["volume_m3"])) if a.size else 0.0, "max_depth_m": float(max(self.series["max_depth_m"])) if a.size else 0.0,
+                   "max_speed_ms": float(max(ms)) if ms else None, "ever_wet_nodes": int(ever.sum()), "total_nodes": int(self.arrival.size),
+                   "median_arrival_min": float(np.nanmedian(self.arrival)) if ever.any() else None}
+        return {"series": self.series, "summary": summary, "arrival_min": self.arrival, "duration_min": self.duration, "dmax_final": self.dmax}
+
+
+def analysis_group_name(thr):
+    return f"analysis/thr_{float(thr):g}"
+
+
+def write_analysis(root, res):
+    """Store a StreamAnalyzer result in the Zarr store (group analysis/thr_<x>)."""
+    import numcodecs
+    g = root.require_group(analysis_group_name(res["summary"]["threshold_m"]))
+    comp = numcodecs.Zlib(level=6)
+    for k in ("arrival_min", "duration_min", "dmax_final"):
+        if k in g: del g[k]
+        g.create_array(k, data=np.asarray(res[k], dtype=np.float32), chunks=res[k].shape, compressors=comp, fill_value=np.nan)
+    g.attrs.update({"series": res["series"], "summary": res["summary"]})
+    return g
+
+
+def read_analysis(root, thr):
+    name = analysis_group_name(thr)
+    try:
+        g = root[name]
+    except KeyError:
+        return None
+    if "summary" not in g.attrs: return None
+    return {"series": dict(g.attrs["series"]), "summary": dict(g.attrs["summary"]),
+            "arrival_min": g["arrival_min"][:], "duration_min": g["duration_min"][:], "dmax_final": g["dmax_final"][:]}
+
+
 class Project:
     """A converted project (Zarr store in cache/). Instances are cached per name."""
     _cache = {}
@@ -35,6 +126,10 @@ class Project:
             return cls._cache[name]
         p = cls(name); cls._cache[name] = p
         return p
+
+    @classmethod
+    def forget(cls, name):
+        cls._cache.pop(name, None)
 
     def __init__(self, name):
         self.name = name
@@ -68,14 +163,14 @@ class Project:
     def range(self, key):
         a = self.g[f"results/{key}"].attrs
         return float(a["min"]), float(a["max"])
+    def is_static(self, key):
+        return self.g[f"results/{key}"].shape[0] == 1
 
     def get(self, var, t):
         key = self.key(var)
-        t = self.step(t)
-        return self.g[f"results/{key}"][t].astype(np.float64)
-
-    def get_all(self, var):
-        return self.g[f"results/{self.key(var)}"][:].astype(np.float64)   # (nt, nj, ni)
+        arr = self.g[f"results/{key}"]
+        t = 0 if arr.shape[0] == 1 else self.step(t)
+        return arr[t].astype(np.float64)
 
     def step(self, t):
         if t is None: return self.nt - 1
@@ -95,16 +190,13 @@ class Project:
                 "time_step_s": float(self.time[1] - self.time[0]) if self.nt > 1 else None,
                 "crs": self.A.get("crs"), "bbox": self.A.get("bbox"), "center_lonlat": [lon, lat],
                 "total_area_m2": float(self.total_area()),
-                "variables": [{"key": k, "name": self.variables[k], "unit": self.unit(k), "min": self.range(k)[0], "max": self.range(k)[1]} for k in self.keys],
+                "variables": [{"key": k, "name": self.variables[k], "unit": self.unit(k), "min": self.range(k)[0], "max": self.range(k)[1], "static": self.is_static(k)} for k in self.keys],
+                "precomputed_analysis": [g for g in (self.g["analysis"].group_keys() if "analysis" in self.g else [])],
                 "source": self.A.get("source_path") or self.A.get("source")}
 
     # ---- geometry
     def cell_areas(self):
-        if self._area is None:
-            x, y = self.x, self.y
-            xa, ya = x[:-1, :-1], y[:-1, :-1]; xb, yb = x[:-1, 1:], y[:-1, 1:]
-            xc, yc = x[1:, 1:], y[1:, 1:]; xd, yd = x[1:, :-1], y[1:, :-1]
-            self._area = 0.5 * np.abs((xa * yb - xb * ya) + (xb * yc - xc * yb) + (xc * yd - xd * yc) + (xd * ya - xa * yd))
+        if self._area is None: self._area = cell_areas(self.x, self.y)
         return self._area
 
     def total_area(self): return self.cell_areas().sum()
@@ -115,17 +207,9 @@ class Project:
         if not (0 <= i < self.ni and 0 <= j < self.nj): raise IndexError(f"(i={i + 1}, j={j + 1}) outside grid {self.ni}x{self.nj}")
         return j, i
 
-    def nearest_node(self, x, y):
-        k = int(np.argmin((self.x - x) ** 2 + (self.y - y) ** 2))
-        return k // self.ni + 1, k % self.ni + 1   # (j, i) 1-based? -> return as (i, j)
-
     # ---- statistics
-    @staticmethod
-    def cell_mean(a):
-        return 0.25 * (a[:-1, :-1] + a[:-1, 1:] + a[1:, 1:] + a[1:, :-1])
-
     def wet_stats(self, depth, thr, u=None, v=None):
-        cm = self.cell_mean(depth); wet = cm > thr
+        cm = cell_mean(depth); wet = cm > thr
         area = self.cell_areas()
         wet_area = float(area[wet].sum()); vol = float((area * cm)[wet].sum())
         nwet = depth > thr
@@ -133,43 +217,32 @@ class Project:
         maxv = float(np.hypot(u, v)[nwet].max()) if (u is not None and nwet.any()) else None
         return {"wet_area_m2": wet_area, "volume_m3": vol, "max_depth_m": maxd, "max_speed_ms": maxv, "wet_nodes": int(nwet.sum())}
 
-    def analyze(self, thr=0.01):
-        """Whole-run statistics + arrival time / inundation duration maps (minutes)."""
+    def analyze(self, thr=0.01, progress=None, store=True):
+        """Whole-run statistics + arrival time / duration maps (minutes). Uses the precomputed group when
+        the threshold matches; otherwise streams through the Zarr cache step by step (and stores the result)."""
+        thr = float(thr)
         if thr in self._analysis: return self._analysis[thr]
-        D = self.get_all("Depth")
-        has_vel = "Velocity_ms_1_X" in self.variables and "Velocity_ms_1_Y" in self.variables
-        U = self.get_all("Velocity_ms_1_X") if has_vel else None
-        V = self.get_all("Velocity_ms_1_Y") if has_vel else None
-        area = self.cell_areas()
-        cm = 0.25 * (D[:, :-1, :-1] + D[:, :-1, 1:] + D[:, 1:, 1:] + D[:, 1:, :-1])
-        wet = cm > thr
-        series = {
-            "time_s": self.time.tolist(),
-            "wet_area_m2": (area * wet).sum(axis=(1, 2)).tolist(),
-            "volume_m3": (area * cm * wet).sum(axis=(1, 2)).tolist(),
-            "max_depth_m": np.where(D > thr, D, 0).max(axis=(1, 2)).tolist(),
-            "max_speed_ms": np.where(D > thr, np.hypot(U, V), 0).max(axis=(1, 2)).tolist() if has_vel else None,
-        }
-        nwet = D > thr
-        first = np.argmax(nwet, axis=0)                       # first step index where wet
-        ever = nwet.any(axis=0)
-        arrival = np.where(ever, self.time[first] / 60.0, np.nan)
-        dt = np.diff(self.time, append=self.time[-1] + (self.time[-1] - self.time[-2] if self.nt > 1 else 0))
-        duration = (nwet * dt[:, None, None]).sum(axis=0) / 60.0
-        a = np.array(series["wet_area_m2"]); pk = int(a.argmax())
-        summary = {"threshold_m": thr, "peak_wet_area_m2": float(a[pk]), "peak_wet_area_time_s": float(self.time[pk]),
-                   "peak_wet_area_fraction": float(a[pk] / self.total_area()), "final_wet_area_m2": float(a[-1]),
-                   "peak_volume_m3": float(max(series["volume_m3"])), "max_depth_m": float(max(series["max_depth_m"])),
-                   "max_speed_ms": float(max(series["max_speed_ms"])) if has_vel else None,
-                   "ever_wet_nodes": int(ever.sum()), "total_nodes": self.N,
-                   "median_arrival_min": float(np.nanmedian(arrival)) if ever.any() else None}
-        res = {"series": series, "summary": summary, "arrival_min": arrival, "duration_min": duration, "dmax_final": self.get("Depth_Max", self.nt - 1) if "Depth_Max" in self.variables else D.max(axis=0)}
+        res = read_analysis(self.g, thr)
+        if res is None:
+            has_vel = "Velocity_ms_1_X" in self.variables and "Velocity_ms_1_Y" in self.variables
+            sa = StreamAnalyzer(self.x, self.y, self.time, thr)
+            for t in range(self.nt):
+                sa.step(t, self.get("Depth", t), self.get("Velocity_ms_1_X", t) if has_vel else None, self.get("Velocity_ms_1_Y", t) if has_vel else None)
+                if progress and t % 10 == 0: progress(t + 1, self.nt)
+            res = sa.finish()
+            if store:
+                try:
+                    write_analysis(zarr.open_group(cache_dir(self.name), mode="a"), res)
+                except Exception as e:
+                    print("analysis not stored:", e)
         self._analysis[thr] = res
         return res
 
     def timeseries(self, var, i, j):
         r, c = self.node(i, j)
-        return self.g[f"results/{self.key(var)}"][:, r, c].astype(np.float64)
+        arr = self.g[f"results/{self.key(var)}"]
+        if arr.shape[0] == 1: return np.repeat(arr[0, r, c].astype(np.float64), self.nt)
+        return arr[:, r, c].astype(np.float64)
 
     def section(self, i, j, mode, t, extra=None, thr=0.01):
         """mode 'xs': fixed i, along j.  'ls': fixed j, along i.  Returns distances and profiles at step t."""

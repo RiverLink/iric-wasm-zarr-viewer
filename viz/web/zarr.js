@@ -1,11 +1,21 @@
 // Minimal Zarr v2 reader (no external dependencies).
 // Supports: C-order arrays, '<f4' '<f8' '<i4' '<u1' dtypes, compressor null or zlib
 // (decoded with the browser's native DecompressionStream), any dimension separator.
+// Decoded chunks are kept in a bounded LRU cache so long runs do not exhaust memory.
 
 const DTYPES = {
   '<f4': Float32Array, '<f8': Float64Array, '<i4': Int32Array, '<u4': Uint32Array,
   '<i2': Int16Array, '<u2': Uint16Array, '|u1': Uint8Array, '|i1': Int8Array,
 };
+export const CHUNK_CACHE_BYTES = 400 * 1024 * 1024;   // per array group of a project, roughly
+const lru = { map: new Map(), bytes: 0 };            // global LRU over all arrays: key -> { arr, bytes }
+function lruGet(key) { const e = lru.map.get(key); if (e) { lru.map.delete(key); lru.map.set(key, e); } return e; }
+function lruPut(key, arr) {
+  const bytes = arr.byteLength || 0;
+  lru.map.set(key, { arr, bytes }); lru.bytes += bytes;
+  while (lru.bytes > CHUNK_CACHE_BYTES && lru.map.size > 1) { const [k, e] = lru.map.entries().next().value; lru.map.delete(k); lru.bytes -= e.bytes; }
+}
+export const chunkCacheStats = () => ({ entries: lru.map.size, bytes: lru.bytes });
 
 async function fetchJSON(url) {
   const r = await fetch(url);
@@ -29,9 +39,11 @@ export class ZarrArray {
     this.TypedArray = DTYPES[meta.dtype];
     if (!this.TypedArray) throw new Error(`unsupported dtype ${meta.dtype}`);
     this.sep = meta.dimension_separator || '.';
-    this.cache = new Map();
+    this.inflight = new Map();
     this.stats = { fetched: 0, bytes: 0, fetchMs: 0, decodeMs: 0 };
   }
+  /** Number of decoded chunks of this array currently cached (for the stats display). */
+  get cache() { let n = 0; for (const k of lru.map.keys()) if (k.startsWith(this.url + '/')) n++; return { size: n }; }
   static async open(url) {
     const [meta, attrs] = await Promise.all([
       fetchJSON(`${url}/.zarray`), fetchJSON(`${url}/.zattrs`).catch(() => ({})),
@@ -42,20 +54,23 @@ export class ZarrArray {
   }
   /** Fetch + decode one chunk by its grid index, e.g. [t, 0, 0]. Returns a TypedArray. */
   async getChunk(idx) {
-    const key = idx.join(this.sep);
-    if (this.cache.has(key)) return this.cache.get(key);
+    const key = `${this.url}/${idx.join(this.sep)}`;
+    const hit = lruGet(key); if (hit) return hit.arr;
+    if (this.inflight.has(key)) return this.inflight.get(key);
     const p = (async () => {
       const t0 = performance.now();
-      const r = await fetch(`${this.url}/${key}`);
+      const r = await fetch(`${this.url}/${idx.join(this.sep)}`);
       if (!r.ok) throw new Error(`chunk ${key}: ${r.status}`);
       const raw = await r.arrayBuffer();
       const t1 = performance.now();
       const dec = await decompress(raw, this.meta.compressor);
       this.stats.fetched++; this.stats.bytes += raw.byteLength;
       this.stats.fetchMs += t1 - t0; this.stats.decodeMs += performance.now() - t1;
-      return new this.TypedArray(dec);
+      const arr = new this.TypedArray(dec);
+      lruPut(key, arr); this.inflight.delete(key);
+      return arr;
     })();
-    this.cache.set(key, p);
+    this.inflight.set(key, p);
     return p;
   }
   /** Convenience: whole array when it is a single chunk. */

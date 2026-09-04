@@ -2,7 +2,7 @@
 // built from arrays converted in the browser (see local.js) or restored from IndexedDB.
 //
 // data = { attrs, x, y (Float32Array N), mx, my (Float64Array N | null), time (Float64Array nt),
-//          results: { key: { data: Float32Array(nt*N), min, max, original_name } } }
+//          results: { key: { data: Float32Array(steps*N), steps (1 for time-invariant), min, max, original_name } } }
 
 class MemArray {
   constructor(shape, data, attrs = {}) {
@@ -15,7 +15,7 @@ class MemArray {
   async getAll() { return this.data; }
   async getChunk(idx) {
     if (this.shape.length !== 3) return this.data;
-    const t = idx[0];
+    const t = this.shape[0] === 1 ? 0 : idx[0];
     return this.data.subarray(t * this.N, (t + 1) * this.N);
   }
 }
@@ -29,7 +29,10 @@ export class MemGroup {
       time: new MemArray([nt], data.time),
     };
     if (data.mx) { this.arrays['grid/x3857'] = new MemArray([nj, ni], data.mx); this.arrays['grid/y3857'] = new MemArray([nj, ni], data.my); }
-    for (const [k, r] of Object.entries(data.results)) this.arrays[`results/${k}`] = new MemArray([nt, nj, ni], r.data, { min: r.min, max: r.max, original_name: r.original_name });
+    for (const [k, r] of Object.entries(data.results)) {
+      const steps = r.steps || (r.data.length / (ni * nj));
+      this.arrays[`results/${k}`] = new MemArray([steps, nj, ni], r.data, { min: r.min, max: r.max, original_name: r.original_name, static: steps === 1 });
+    }
   }
   async array(path) {
     const a = this.arrays[path];

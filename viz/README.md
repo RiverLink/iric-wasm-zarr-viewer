@@ -51,12 +51,26 @@ viz/
   cache/<name>.zarr  変換キャッシュ（元ファイルの更新時刻で失効判定）
 ```
 
+### 大容量対応（第 1 段階）
+
+- **ストリーミング変換**: CGNS を 1 ステップずつ読んで Zarr チャンクに書くため、メモリ使用量はステップ数に依存しない（格子 1 ステップ分）
+- **時間不変の変数は 1 回だけ保存**: 標高など全ステップで同一の変数は shape (1, nj, ni) で保存（`static: true`）
+- **解析の事前計算**: 変換時に浸水面積・貯留量・最大水深・最大流速の時系列、到達時間・浸水継続時間・最大水深マップを計算し `analysis/thr_0.01/` に同梱。ブラウザは結果を読むだけ
+- **時系列・解析はサーバー API**: サーバーモードの地点時系列と全ステップ解析は `/api/timeseries` `/api/analyze` が Zarr をディスクから読んで返す。閾値を変えた解析もサーバーがステップ単位で計算し、結果を Zarr に追記する
+- **ブラウザ側 LRU キャッシュ**: 展開済みチャンクの保持量に上限（約 400 MB）
+- ブラウザ内変換（静的モード）は目安 1.5 GB まで。超える場合は注意を表示し、サーバーモードを推奨
+- 規模試験: `python make_big.py 3` で格子を 3×3 に敷き詰めた合成 CGNS（約 0.8 GB）を `../projects_big/` に作れる
+
 ### API（server.py）
 
 | メソッド | パス | 内容 |
 |---|---|---|
 | GET | `/api/projects?folder=` | フォルダ内の `*.ipro` と `project.xml` を含むフォルダを列挙 |
 | POST | `/api/convert` `{path}` | 1 プロジェクトを変換（キャッシュ済みならスキップ） |
+| GET | `/api/convert/status?name=` | 変換の進捗 |
+| GET | `/api/analyze?name=&thr=` | 全ステップ解析（事前計算済みなら即時） |
+| GET | `/api/timeseries?name=&var=&i=&j=` | 節点の時系列 |
+| GET | `/api/section?name=&i=&j=&mode=&t=` | 横断面 / 縦断面 |
 | POST | `/api/pick-folder` | サーバー側でフォルダ選択ダイアログを開く |
 | POST | `/api/report` `{title, subtitle, sections:[...]}` | pptx を生成して返す |
 | GET | `/data/<name>/...` | `cache/<name>.zarr` の配信 |

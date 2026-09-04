@@ -80,7 +80,7 @@ async def main():
         await pg.get_by_label('クリック動作').select_option('xs')
         await click_wet(pg, 0); await pg.wait_for_timeout(3000)
         await pg.evaluate("document.getElementById('grp-layout').open = true"); await pg.wait_for_timeout(300)
-        await pg.get_by_role('button', name='差分').click(); await pg.wait_for_timeout(4000)
+        await pg.locator('#grp-layout-body .presets button', has_text='差分').click(); await pg.wait_for_timeout(4000)
         print('infoline:', (await pg.inner_text('.infoline'))[:120])
         await pg.screenshot(path='shots/A_compare_diff.png')
         await pg.evaluate("document.getElementById('grp-output').open = true"); await pg.wait_for_timeout(300)

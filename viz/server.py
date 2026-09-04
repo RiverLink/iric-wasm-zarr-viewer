@@ -1,30 +1,37 @@
 """Local app server: static web/, project folder scanning, .ipro -> Zarr conversion cache,
-Zarr data serving and PPTX report generation.  Standard library only (plus the converter deps).
+Zarr data serving, analysis API and PPTX report generation.  Standard library only (plus the
+converter / analysis deps).
 
   python server.py [port]            -> http://127.0.0.1:8765/
 API
   GET  /api/projects?folder=<path>   list iRIC projects (*.ipro or folders with project.xml)
   POST /api/convert   {"path": ...}  convert one project into cache/<name>.zarr (skipped if up to date)
+  GET  /api/convert/status?name=     progress of a running conversion {"step", "nt", "done", "error"}
+  GET  /api/analyze?name=&thr=       whole-run statistics (precomputed at conversion, else streamed)
+  GET  /api/timeseries?name=&var=&i=&j=   node time series (1-based i, j)
+  GET  /api/section?name=&i=&j=&mode=&t=&var=&thr=
   POST /api/pick-folder              open a native folder dialog on this machine, return the path
   POST /api/report    {spec}         build a .pptx from the report spec (see report.py)
   GET  /data/<name>/...              files of cache/<name>.zarr
 """
-import os, sys, json, threading, mimetypes, traceback, urllib.parse
+import os, sys, json, base64, threading, mimetypes, traceback, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-import convert, report
+import numpy as np
+import convert, report, analysis
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-CACHE = os.path.join(HERE, "cache")
+CACHE = analysis.CACHE
 os.makedirs(CACHE, exist_ok=True)
 MIME = {".wasm": "application/wasm", ".js": "text/javascript; charset=utf-8", ".html": "text/html; charset=utf-8",
         ".json": "application/json", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml"}
 convert_lock = threading.Lock()
 dialog_lock = threading.Lock()
+convert_status = {}     # name -> {"step", "nt", "done", "error"}
 
 
 def cache_dir(name):
-    return os.path.join(CACHE, convert.safe(name) + ".zarr")
+    return analysis.cache_dir(name)
 
 
 def project_meta(name):
@@ -64,11 +71,13 @@ def scan_folder(folder):
         size = os.path.getsize(path) if kind == "ipro" else sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
         mtime = os.path.getmtime(path)
         meta = project_meta(name)
-        converted = bool(meta) and meta.get("source_mtime", 0) >= mtime
+        converted = bool(meta) and meta.get("source_mtime", 0) >= mtime and meta.get("format") == 2
+        st = convert_status.get(name)
         out.append({"name": name, "path": path, "kind": kind, "size": size, "mtime": mtime,
                     "solver": info.get("solver"), "solverVersion": info.get("solverVersion"), "crs": info.get("crs"),
                     "cgns": info.get("cgns"), "error": info.get("error"), "converted": converted,
-                    "meta": {k: meta.get(k) for k in ("ni", "nj", "nt", "variables", "crs")} if converted else None})
+                    "converting": bool(st and not st.get("done")),
+                    "meta": {k: meta.get(k) for k in ("ni", "nj", "nt", "variables", "crs", "convert_seconds")} if converted else None})
     return out
 
 
@@ -77,17 +86,23 @@ def do_convert(path):
     dst = cache_dir(name)
     mtime = os.path.getmtime(path)
     meta = project_meta(name)
-    if meta and meta.get("source_mtime", 0) >= mtime:
+    if meta and meta.get("source_mtime", 0) >= mtime and meta.get("format") == 2:
         return {"name": name, "cached": True, "meta": meta}
     with convert_lock:
         log = []
-        attrs = convert.convert_project(path, dst, log=lambda m: (log.append(str(m)), print(m)))
-        # stamp the source mtime so we can detect stale caches
-        import zarr
-        g = zarr.open_group(dst, mode="a", zarr_format=2)
-        g.attrs["source_mtime"] = mtime
-        g.attrs["source_path"] = path
-        attrs["source_mtime"] = mtime
+        st = convert_status[name] = {"step": 0, "nt": 0, "done": False, "error": None}
+        def progress(step, nt): st["step"], st["nt"] = step, nt
+        try:
+            attrs = convert.convert_project(path, dst, log=lambda m: (log.append(str(m)), print(m)), progress=progress)
+            import zarr
+            g = zarr.open_group(dst, mode="a", zarr_format=2)
+            g.attrs["source_mtime"] = mtime
+            g.attrs["source_path"] = path
+            attrs["source_mtime"] = mtime
+        except Exception as e:
+            st["error"] = str(e); st["done"] = True; raise
+        st["done"] = True
+        analysis.Project.forget(name)
     return {"name": name, "cached": False, "meta": attrs, "log": log}
 
 
@@ -100,6 +115,10 @@ def pick_folder(initial):
             return filedialog.askdirectory(initialdir=initial or HERE, title="iRIC プロジェクトが入ったフォルダを選択")
         finally:
             root.destroy()
+
+
+def b64f32(a):
+    return base64.b64encode(np.ascontiguousarray(np.asarray(a, dtype=np.float32)).tobytes()).decode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -142,11 +161,27 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routes
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        q = urllib.parse.parse_qs(u.query)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         try:
             if u.path == "/api/projects":
-                folder = q.get("folder", [""])[0]
+                folder = q.get("folder", "")
                 return self.send_json({"folder": os.path.abspath(folder), "projects": scan_folder(folder)})
+            if u.path == "/api/convert/status":
+                return self.send_json(convert_status.get(q.get("name"), {"done": True}))
+            if u.path == "/api/analyze":
+                p = analysis.Project.open(q["name"]); thr = float(q.get("thr", convert.DEFAULT_THR))
+                r = p.analyze(thr)
+                return self.send_json({"name": p.name, "threshold": thr, "series": r["series"], "summary": r["summary"], "total_area_m2": float(p.total_area()),
+                                       "nj": p.nj, "ni": p.ni, "arrival_min_b64": b64f32(r["arrival_min"]), "duration_min_b64": b64f32(r["duration_min"])})
+            if u.path == "/api/timeseries":
+                p = analysis.Project.open(q["name"])
+                keys = [p.key(v) for v in q.get("var", "Depth").split(",") if v]
+                i, j = int(q["i"]), int(q["j"])
+                return self.send_json({"name": p.name, "i": i, "j": j, "time_s": p.time.tolist(), "series": {k: analysis.to_list(p.timeseries(k, i, j), 5) for k in keys}})
+            if u.path == "/api/section":
+                p = analysis.Project.open(q["name"])
+                s = p.section(int(q["i"]), int(q["j"]), q.get("mode", "xs"), int(q.get("t", -1)), extra=q.get("var") or None, thr=float(q.get("thr", convert.DEFAULT_THR)))
+                return self.send_json({k: (analysis.to_list(v, 4) if isinstance(v, np.ndarray) else v) for k, v in s.items()})
             if u.path.startswith("/data/"):
                 parts = u.path[len("/data/"):].split("/", 1)
                 name = urllib.parse.unquote(parts[0]); rest = urllib.parse.unquote(parts[1]) if len(parts) > 1 else ""
