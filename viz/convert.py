@@ -27,6 +27,23 @@ def safe(name):
     return analysis.safe(name)
 
 
+def project_name(path):
+    """Display / cache name of a project path: folder name as is, file name without extension."""
+    base = os.path.basename(os.path.normpath(path))
+    return base if os.path.isdir(path) else os.path.splitext(base)[0]
+
+
+def set_attrs(arr, d, tries=12):
+    """attrs.update with retries: on Windows the atomic rename of .zattrs can fail transiently
+    (virus scanner / indexer holding the file)."""
+    for k in range(tries):
+        try:
+            arr.attrs.update(d); return
+        except PermissionError:
+            if k == tries - 1: raise
+            time.sleep(0.25 * (k + 1))
+
+
 def read_project_xml(xml_bytes):
     root = ET.fromstring(xml_bytes)
     info = {
@@ -39,14 +56,18 @@ def read_project_xml(xml_bytes):
     return info
 
 
-def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, progress=None):
+def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, progress=None, phase=lambda p: None):
     """Convert one CGNS result file to a Zarr v2 store at dst (streaming). Returns the root attributes.
     progress(step, nt) is called every few steps."""
     info = dict(info or {})
     t_start = time.time()
     f = h5py.File(src, "r")
+    if "iRIC" not in f or "iRICZone" not in f["iRIC"]:
+        raise ValueError("iRIC の格子データ（iRIC/iRICZone）がありません")
     base = f["iRIC"]
     zone = base["iRICZone"]
+    if not any(re.fullmatch(r"FlowSolution\d+", k) for k in zone) or "BaseIterativeData" not in base or "TimeValues" not in base["BaseIterativeData"]:
+        raise ValueError("計算結果（FlowSolution / TimeValues）がありません。計算が実行されていないか、結果が保存されていないプロジェクトです")
     ni, nj = [int(v) for v in zone[" data"][()][0]]
     x = zone["GridCoordinates/CoordinateX/ data"][()].astype(np.float32)
     y = zone["GridCoordinates/CoordinateY/ data"][()].astype(np.float32)
@@ -59,7 +80,10 @@ def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, prog
     first = zone[sols[0]]
     variables = [k for k in first if not k.startswith(" ") and " data" in first[k]]
     read = lambda t, v: zone[sols[t]][v][" data"][()]
+    keymap = analysis.canonical_keys(variables)          # original name -> canonical key
     log(f"grid {ni}x{nj} ({ni * nj} nodes), {nt} steps, vars: {variables}")
+    log("keys: " + ", ".join(f"{v}->{k}" for v, k in keymap.items() if safe(v) != k))
+    phase('convert')
 
     # time-invariant variables are stored once (compare first / middle / last step)
     static = {}
@@ -97,14 +121,13 @@ def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, prog
     res = root.create_group("results")
     arrays, names, lo, hi = {}, {}, {}, {}
     for v in variables:
-        key = safe(v); names[key] = v
+        key = keymap[v]; names[key] = v
         n = 1 if static[v] else nt
         arrays[v] = res.create_array(key, shape=(n, nj, ni), chunks=(1, nj, ni), dtype=np.float32, compressors=comp, fill_value=np.nan)
-        arrays[v].attrs["original_name"] = v; arrays[v].attrs["static"] = bool(static[v])
         lo[v], hi[v] = np.inf, -np.inf
 
     # ---- streaming pass: write chunks and accumulate the analysis
-    keys = {safe(v): v for v in variables}
+    keys = {k: v for v, k in keymap.items()}
     has_vel = "Velocity_ms_1_X" in keys and "Velocity_ms_1_Y" in keys and "Depth" in keys
     sa = analysis.StreamAnalyzer(x, y, time_, thr) if "Depth" in keys else None
     for t in range(nt):
@@ -120,10 +143,10 @@ def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, prog
             sa.step(t, cur[keys["Depth"]], cur.get(keys.get("Velocity_ms_1_X")), cur.get(keys.get("Velocity_ms_1_Y")))
         if progress and (t % 10 == 0 or t == nt - 1): progress(t + 1, nt)
         if t % 50 == 0 or t == nt - 1: log(f"  step {t + 1}/{nt}  ({time.time() - t_start:.1f} s)")
+    phase('finalize')
     for v in variables:
-        arrays[v].attrs["min"] = lo[v] if np.isfinite(lo[v]) else 0.0
-        arrays[v].attrs["max"] = hi[v] if np.isfinite(hi[v]) else 0.0
-        log(f"  {v:32s} -> results/{safe(v):32s} [{arrays[v].attrs['min']:.4g}, {arrays[v].attrs['max']:.4g}]{'  (static)' if static[v] else ''}")
+        set_attrs(arrays[v], {"original_name": v, "static": bool(static[v]), "min": lo[v] if np.isfinite(lo[v]) else 0.0, "max": hi[v] if np.isfinite(hi[v]) else 0.0})
+        log(f"  {v:32s} -> results/{keymap[v]:32s} [{arrays[v].attrs['min']:.4g}, {arrays[v].attrs['max']:.4g}]{'  (static)' if static[v] else ''}")
     attrs["variables"] = names
     if sa is not None:
         r = sa.finish(); analysis.write_analysis(root, r)
@@ -131,28 +154,28 @@ def convert_cgns(src, dst, crs=None, info=None, log=print, thr=DEFAULT_THR, prog
         S = r["summary"]
         log(f"analysis: peak wet area {S['peak_wet_area_m2'] / 1e6:.3f} km2 @ {S['peak_wet_area_time_s']:g} s, max depth {S['max_depth_m']:.2f} m")
     attrs["convert_seconds"] = round(time.time() - t_start, 1)
-    root.attrs.update(attrs)
+    set_attrs(root, attrs)
     f.close()
     log(f"done in {attrs['convert_seconds']} s")
     return attrs
 
 
-def convert_project(path, dst, log=print, thr=DEFAULT_THR, progress=None):
+def convert_project(path, dst, log=print, thr=DEFAULT_THR, progress=None, phase=lambda p: None):
     """Convert an .ipro file, an extracted project folder, or a bare CGNS file."""
     path = os.path.abspath(path)
-    name = os.path.splitext(os.path.basename(path))[0]
+    name = project_name(path)
     if path.lower().endswith(".cgn"):
-        return convert_cgns(path, dst, info={"project": name}, log=log, thr=thr, progress=progress)
+        return convert_cgns(path, dst, info={"project": name}, log=log, thr=thr, progress=progress, phase=phase)
     if os.path.isdir(path):
         info = read_project_xml(open(os.path.join(path, "project.xml"), "rb").read())
         cgn = os.path.join(path, info["cgns"] + ".cgn")
-        return convert_cgns(cgn, dst, crs=info["crs"], info={"project": name, **{k: v for k, v in info.items() if k != "cgns"}}, log=log, thr=thr, progress=progress)
+        return convert_cgns(cgn, dst, crs=info["crs"], info={"project": name, **{k: v for k, v in info.items() if k != "cgns"}}, log=log, thr=thr, progress=progress, phase=phase)
     with zipfile.ZipFile(path) as z, tempfile.TemporaryDirectory(dir=os.environ.get("IRIC_TMP_DIR")) as tmp:
         info = read_project_xml(z.read("project.xml"))
         member = info["cgns"] + ".cgn"
-        log(f"extracting {member} from {os.path.basename(path)} …")
+        log(f"extracting {member} from {os.path.basename(path)} …"); phase('extract')
         cgn = z.extract(member, tmp)
-        return convert_cgns(cgn, dst, crs=info["crs"], info={"project": name, **{k: v for k, v in info.items() if k != "cgns"}}, log=log, thr=thr, progress=progress)
+        return convert_cgns(cgn, dst, crs=info["crs"], info={"project": name, **{k: v for k, v in info.items() if k != "cgns"}}, log=log, thr=thr, progress=progress, phase=phase)
 
 
 if __name__ == "__main__":

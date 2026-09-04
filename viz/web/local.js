@@ -5,6 +5,24 @@ import { toMercator } from './proj.js';
 
 const H5WASM_URL = 'https://cdn.jsdelivr.net/npm/h5wasm@0.10.3/dist/esm/hdf5_hl.js';
 const safe = (s) => s.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'x';
+const ALIASES = {
+  Depth: ['Depth', 'Depth(m)', 'WaterDepth', 'WaterDepth(m)', 'depth'],
+  WaterSurfaceElevation: ['WaterSurfaceElevation', 'WaterSurf(m)', 'WaterSurface(m)', 'WaterLevel(m)', 'WaterSurfaceElevation(m)'],
+  Elevation: ['Elevation', 'Elevation(m)', 'BedElevation(m)', 'Elevation (m)'],
+  Velocity_ms_1_X: ['Velocity(ms-1)X', 'VelocityX', 'Velocity(m/s)X', 'Velocity(ms-1)_X'],
+  Velocity_ms_1_Y: ['Velocity(ms-1)Y', 'VelocityY', 'Velocity(m/s)Y', 'Velocity(ms-1)_Y'],
+  Velocity_magnitude_Max: ['Velocity (magnitude Max)', 'VelocityMax(m_s)', 'VelocityMax(m/s)', 'VelocityMax'],
+  Depth_Max: ['Depth(Max)', 'DepthMax(m)', 'DepthMax'],
+  WaterSurfaceElevation_Max: ['WaterSurfMax(m)', 'WaterSurfaceElevation(Max)', 'WaterSurfaceMax(m)'],
+  Elevation_Max: ['ElevationMax(m)'], Elevation_Min: ['ElevationMin(m)'],
+};
+const norm = (s) => s.replace(/[\s_]+/g, '').toLowerCase();
+const ALIAS_LOOKUP = new Map(); for (const [k, al] of Object.entries(ALIASES)) for (const a of al) ALIAS_LOOKUP.set(norm(a), k);
+function canonicalKeys(names) {
+  const out = new Map(), used = new Set();
+  for (const v of names) { let key = ALIAS_LOOKUP.get(norm(v)) || safe(v); const base = key; let n = 2; while (used.has(key)) key = `${base}_${n++}`; used.add(key); out.set(v, key); }
+  return out;
+}
 
 // ---------------------------------------------------------------- zip (central directory + deflate-raw)
 async function readZipDirectory(file) {
@@ -75,9 +93,10 @@ async function convertCgns(buf, info, name, onProgress) {
     const first = f.get(`iRIC/iRICZone/${sols[0]}`);
     const vars = first.keys().filter((k) => !k.startsWith(' ') && first.get(k).keys && first.get(k).keys().includes(' data'));
     const results = {}, variables = {};
+    const keymap = canonicalKeys(vars);
     const same = (a, b) => { if (a.length !== b.length) return false; for (let k = 0; k < a.length; k++) if (a[k] !== b[k] && !(a[k] !== a[k] && b[k] !== b[k])) return false; return true; };
     for (const [vi, v] of vars.entries()) {
-      const key = safe(v); variables[key] = v;
+      const key = keymap.get(v); variables[key] = v;
       const a0 = f.get(`iRIC/iRICZone/${sols[0]}/${v}/ data`).value;
       // time-invariant variables (e.g. Elevation) are stored once
       const isStatic = nt > 2 && same(a0, f.get(`iRIC/iRICZone/${sols[nt - 1]}/${v}/ data`).value) && same(a0, f.get(`iRIC/iRICZone/${sols[nt >> 1]}/${v}/ data`).value);

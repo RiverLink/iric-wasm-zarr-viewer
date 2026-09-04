@@ -24,8 +24,35 @@ def cache_dir(name):
     return os.path.join(CACHE, safe(name) + ".zarr")
 
 
-UNITS = {"Depth": "m", "Depth_Max": "m", "Elevation": "m", "WaterSurfaceElevation": "m",
-         "Velocity_ms_1_X": "m/s", "Velocity_ms_1_Y": "m/s", "Velocity_magnitude_Max": "m/s"}
+UNITS = {"Depth": "m", "Depth_Max": "m", "Elevation": "m", "WaterSurfaceElevation": "m", "WaterSurfaceElevation_Max": "m",
+         "Elevation_Max": "m", "Elevation_Min": "m", "Velocity_ms_1_X": "m/s", "Velocity_ms_1_Y": "m/s", "Velocity_magnitude_Max": "m/s"}
+
+# Solver-specific result names -> canonical keys used by the analysis and the viewer.
+# (Nays2D Flood uses the canonical names; Nays2DH / CTIE-2D use the "(m)" style.)
+ALIASES = {
+    "Depth": ["Depth", "Depth(m)", "WaterDepth", "WaterDepth(m)", "depth"],
+    "WaterSurfaceElevation": ["WaterSurfaceElevation", "WaterSurf(m)", "WaterSurface(m)", "WaterLevel(m)", "WaterSurfaceElevation(m)"],
+    "Elevation": ["Elevation", "Elevation(m)", "BedElevation(m)", "Elevation (m)"],
+    "Velocity_ms_1_X": ["Velocity(ms-1)X", "VelocityX", "Velocity(m/s)X", "Velocity(ms-1)_X"],
+    "Velocity_ms_1_Y": ["Velocity(ms-1)Y", "VelocityY", "Velocity(m/s)Y", "Velocity(ms-1)_Y"],
+    "Velocity_magnitude_Max": ["Velocity (magnitude Max)", "VelocityMax(m_s)", "VelocityMax(m/s)", "VelocityMax"],
+    "Depth_Max": ["Depth(Max)", "DepthMax(m)", "DepthMax"],
+    "WaterSurfaceElevation_Max": ["WaterSurfMax(m)", "WaterSurfaceElevation(Max)", "WaterSurfaceMax(m)"],
+    "Elevation_Max": ["ElevationMax(m)"], "Elevation_Min": ["ElevationMin(m)"],
+}
+_norm = lambda s: re.sub(r"[\s_]+", "", s).lower()
+_ALIAS_LOOKUP = {_norm(a): k for k, al in ALIASES.items() for a in al}
+
+
+def canonical_keys(names):
+    """Map original result names to unique keys: canonical alias when known, else safe(name)."""
+    out, used = {}, set()
+    for v in names:
+        key = _ALIAS_LOOKUP.get(_norm(v)) or safe(v)
+        base, n = key, 2
+        while key in used: key = f"{base}_{n}"; n += 1
+        used.add(key); out[v] = key
+    return out
 
 
 def cell_areas(x, y):

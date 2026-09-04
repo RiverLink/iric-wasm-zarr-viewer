@@ -69,12 +69,26 @@ viz/
 
 変換時間は元データ量にほぼ比例し（約 30 MB/s）、10 GB で 6 分程度、サーバーのメモリはステップ数によらず 100 MB 前後。
 
+### 多数ケースの運用（第 2 段階）
+
+- **登録フォルダ（ルート）とカタログ**: 「データ」でフォルダを登録すると、その中の iRIC プロジェクトが SQLite カタログ（`cache/catalog.sqlite`）に載る。一覧は検索（名前・ソルバー・タグ）と並べ替え（名前・更新日・ステップ数・サイズ・最大水深・浸水面積・最近開いた）ができ、変換済みケースは解析要約（最大水深など）を一覧に表示する
+- **変換ジョブキュー**: 「変換」「すべて変換」でバックグラウンドの変換キューに入る（同時実行数は「設定」で変更、既定 2）。各行に進捗（展開 / 変換 xx% / 仕上げ）と中止ボタンが出る。未変換のケースを「表示」した場合も自動でキューに入り、完了後に開く
+- **キャッシュ容量管理**: 「設定」のキャッシュ上限（既定 50 GB）を超えると、最近開いていないケースの Zarr から順に削除する（カタログには残り、再変換できる）。空き容量が少ないと一覧に警告
+- **変数名の正規化**: Nays2D Flood の `Depth` / Nays2DH・CTIE-2D の `Depth(m)` `WaterSurf(m)` `Elevation(m)` などを共通キーに揃える（`analysis.ALIASES`）。水深のないケース（流速のみ）は表示のみで解析は付かない
+- **Windows 対策**: 属性ファイルの書き込みはウイルス対策などによる一時的なアクセス拒否を再試行する。「.」を含むフォルダ名のケースも正しく扱う
+- MCP: `catalog_projects` / `register_root` / `queue_conversions` を追加
+
 ### API（server.py）
 
 | メソッド | パス | 内容 |
 |---|---|---|
 | GET | `/api/projects?folder=` | フォルダ内の `*.ipro` と `project.xml` を含むフォルダを列挙 |
-| POST | `/api/convert` `{path}` | 1 プロジェクトを変換（キャッシュ済みならスキップ） |
+| GET/POST | `/api/roots`, `/api/roots/remove` | 登録フォルダの一覧・追加（スキャン付き）・解除 |
+| POST | `/api/scan` | 登録フォルダを再スキャン |
+| GET | `/api/catalog?q=&sort=&desc=` | カタログ（変換状態・解析要約・ジョブ進捗） |
+| POST/GET | `/api/jobs`, `/api/jobs/cancel` | 変換キュー（投入・一覧・中止） |
+| GET | `/api/storage`, GET/POST `/api/config` | キャッシュ容量・空き、上限と同時実行数 |
+| POST | `/api/convert` `{path}` | 1 プロジェクトを同期変換（キューに入れて完了まで待つ。MCP 用） |
 | GET | `/api/convert/status?name=` | 変換の進捗 |
 | GET | `/api/analyze?name=&thr=` | 全ステップ解析（事前計算済みなら即時） |
 | GET | `/api/timeseries?name=&var=&i=&j=` | 節点の時系列 |

@@ -65,6 +65,47 @@ def list_projects(folder: str) -> dict:
 
 
 @mcp.tool()
+def catalog_projects(query: str = "", sort: str = "name", desc: bool = False) -> dict:
+    """Projects known to the server catalog (registered root folders): conversion state, grid, steps and the
+    precomputed flood summary (peak wet area, max depth, ...). sort: name|mtime|nt|size|max_depth|peak_area|last_opened.
+    Use register_root to add folders; the web server (server.py) must be running for conversions in the background."""
+    import catalog
+    rows = catalog.list_projects(query, sort, desc)
+    keep = ("name", "path", "solver", "crs", "ni", "nj", "nt", "converted", "peak_area_m2", "peak_area_time_s", "max_depth_m", "max_speed_ms", "ever_wet", "total_nodes", "tags", "error")
+    return {"roots": [r["folder"] for r in catalog.roots()], "count": len(rows), "projects": [{k: r.get(k) for k in keep} for r in rows]}
+
+
+@mcp.tool()
+def register_root(folder: str) -> dict:
+    """Register a folder of iRIC projects in the catalog and scan it (does not convert)."""
+    import catalog, server
+    f = catalog.add_root(folder)
+    n = server.scan_roots()
+    return {"folder": f, "scanned": n, "roots": [r["folder"] for r in catalog.roots()]}
+
+
+@mcp.tool()
+def queue_conversions(names: str = "", all_unconverted: bool = False) -> dict:
+    """Queue background conversions on the running web server (server.py) for the named catalog projects
+    (comma separated) or for every unconverted project. Returns the job states; poll catalog_projects for
+    progress. Falls back to converting synchronously in this process when the server is not running."""
+    import json as _json, urllib.request, catalog
+    sel = [n.strip() for n in names.split(",") if n.strip()]
+    if all_unconverted: sel += [r["name"] for r in catalog.list_projects(converted=False) if not r.get("error")]
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{VIEWER_PORT}/api/jobs", data=_json.dumps({"names": sel}).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r: return _json.loads(r.read())
+    except Exception as e:
+        out = []
+        for n in sel:
+            row = catalog.get(n)
+            if row and row.get("path"):
+                try: out.append({"name": n, "state": "done", "meta": convert_project(row["path"])})
+                except Exception as ex: out.append({"name": n, "state": "error", "error": str(ex)})
+        return {"jobs": out, "note": f"server not reachable ({e}); converted synchronously"}
+
+
+@mcp.tool()
 def convert_project(path: str) -> dict:
     """Convert one iRIC project (.ipro, project folder, or .cgn) into the Zarr cache so the other tools can
     use it. Returns the project name and metadata. Skipped when the cache is up to date."""
